@@ -1,9 +1,10 @@
 import { combineReducers } from '@reduxjs/toolkit';
-import templateReducer from './slices/templateSlice';
+import playlistReducer from './slices/playlistSlice';
+import sessionReducer from './slices/sessionSlice';
 
 const rootReducer = combineReducers({
-    //name: nameReducer,
-    template: templateReducer,
+    playlist: playlistReducer,
+    session: sessionReducer,
 });
 
 export default rootReducer;

@@ -1,25 +1,22 @@
 import './App.css'
 
 import React, { lazy, Suspense } from "react";
-import { Routes, Route, Navigate } from "react-router-dom";
-import { useDispatch, useSelector } from "react-redux";
+import { Routes, Route } from "react-router-dom";
 
 function App() {
-  const Test = lazy(() => import("./pages/Test"));
-  // const Home = lazy(() => import("./pages/Home"));
-  // const TestParam = lazy(() => import("./pages/TestParam"));
+  const Landing = lazy(() => import("./pages/Landing"));
+  const Host = lazy(() => import("./pages/Host"));
+  const Join = lazy(() => import("./pages/Join"));
 
   return (
-    <>
-      <Suspense fallback={<div>Loading...</div>}>
-        <Routes>
-          <Route exact path="/" element={<Test />} />
-          {/* <Route exact path="/" element={<Home/>} /> */}
-          {/* <Route exact path="/products/test/:param" element={<TestParam/>} /> */}
-        </Routes>
-      </Suspense>
-    </>
-  )
+    <Suspense fallback={<div className="page">Loading...</div>}>
+      <Routes>
+        <Route path="/" element={<Landing />} />
+        <Route path="/host" element={<Host />} />
+        <Route path="/join" element={<Join />} />
+      </Routes>
+    </Suspense>
+  );
 }
 
 export default App
