@@ -24,7 +24,6 @@ const Host = () => {
   const isHosting = session.role === 'host';
 
   // --- setup form state ---
-  const [port, setPort] = useState(8080);
   const [room, setRoom] = useState('main');
   const [password, setPassword] = useState('');
   const [displayName, setDisplayName] = useState('Host');
@@ -33,6 +32,7 @@ const Host = () => {
   const [nowPlaying, setNowPlaying] = useState(null); // { videoId, title }
   const [urlInput, setUrlInput] = useState('');
   const [addError, setAddError] = useState('');
+  const [playbackNote, setPlaybackNote] = useState('');
 
   const playerRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -41,7 +41,6 @@ const Host = () => {
 
   const { status, error, guestCount, send } = useConnection({
     role: isHosting ? 'host' : null,
-    port: session.port,
     room: session.room,
     password: session.password,
     enabled: isHosting,
@@ -72,6 +71,7 @@ const Host = () => {
   }, [status, broadcast]);
 
   const playVideo = useCallback((videoId, title) => {
+    setPlaybackNote('');
     setNowPlaying({ videoId, title });
     nowPlayingRef.current = { videoId, title };
     if (playerRef.current) playerRef.current.load(videoId, 0, true);
@@ -81,7 +81,7 @@ const Host = () => {
 
   const handleStartHosting = (e) => {
     e.preventDefault();
-    dispatch(startHosting({ port: Number(port), room, password, displayName }));
+    dispatch(startHosting({ room, password, displayName }));
   };
 
   const resolveInput = () => {
@@ -121,6 +121,25 @@ const Host = () => {
     if (next < items.length) handlePlayFromList(next);
   }, [items, currentIndex]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Called when the YouTube player can't play the current video.
+  const handlePlayerError = useCallback((code) => {
+    const messages = {
+      2: 'YouTube rejected that video ID.',
+      5: 'This video can\'t be played in an embedded player.',
+      100: 'That video was removed or is private.',
+      101: 'The owner disabled embedding for this video, so it can\'t play here.',
+      150: 'The owner disabled embedding for this video, so it can\'t play here.',
+    };
+    const np = nowPlayingRef.current;
+    const label = np ? ` (${np.title})` : '';
+    setPlaybackNote(`${messages[code] || 'This video could not be played.'}${label}`);
+    // Stop guests from trying to play the broken video.
+    broadcast({ isPlaying: false });
+    // Skip ahead to the next track if there is one.
+    const next = currentIndex + 1;
+    if (items.length > 0 && next < items.length) handlePlayFromList(next);
+  }, [broadcast, items, currentIndex]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // CSV import/export
   const handleExport = () => {
     downloadCsv('servertunes-playlist.csv', playlistToCsv(items));
@@ -150,15 +169,12 @@ const Host = () => {
       <div className="page host-setup">
         <button className="link-back" onClick={() => navigate('/')}>&larr; Back</button>
         <h1>Host a session</h1>
-        <p className="tagline">Start the sync server first: <code>npm run server</code></p>
+        <p className="tagline">Sync runs through the public test.mosquitto.org broker. No port forwarding needed.</p>
         <form className="form" onSubmit={handleStartHosting}>
           <label>Display name
             <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
           </label>
-          <label>Port (must match the server &amp; be port-forwarded)
-            <input type="number" value={port} onChange={(e) => setPort(e.target.value)} />
-          </label>
-          <label>Room name
+          <label>Room name (share this with guests)
             <input value={room} onChange={(e) => setRoom(e.target.value)} />
           </label>
           <label>Room password (optional)
@@ -188,10 +204,12 @@ const Host = () => {
             controllable
             onStateChange={() => broadcast()}
             onEnded={handleNext}
+            onError={handlePlayerError}
           />
           <div className="now-playing">
             {nowPlaying ? `Now playing: ${nowPlaying.title}` : 'Nothing playing yet'}
           </div>
+          {playbackNote && <div className="banner error">{playbackNote}</div>}
 
           <div className="add-row">
             <input

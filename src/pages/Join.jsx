@@ -14,8 +14,6 @@ const Join = () => {
   const session = useSelector((s) => s.session);
   const isJoined = session.role === 'guest';
 
-  const [host, setHost] = useState('');
-  const [port, setPort] = useState(8080);
   const [room, setRoom] = useState('main');
   const [password, setPassword] = useState('');
   const [displayName, setDisplayName] = useState('Guest');
@@ -60,14 +58,13 @@ const Join = () => {
 
   const { status, error, send } = useConnection({
     role: isJoined ? 'guest' : null,
-    host: session.host,
-    port: session.port,
     room: session.room,
     password: session.password,
     onState: applyState,
     onHostLeft: handleHostLeft,
     enabled: isJoined,
   });
+
   void send;
 
   // Re-apply latest state once the player becomes ready isn't tracked here;
@@ -75,7 +72,7 @@ const Join = () => {
 
   const handleJoin = (e) => {
     e.preventDefault();
-    dispatch(startJoining({ host, port: Number(port), room, password, displayName }));
+    dispatch(startJoining({ room, password, displayName }));
   };
 
   const handleLeave = () => {
@@ -98,14 +95,8 @@ const Join = () => {
           <label>Display name
             <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
           </label>
-          <label>Host IP or hostname
-            <input placeholder="e.g. 203.0.113.5" value={host} onChange={(e) => setHost(e.target.value)} required />
-          </label>
-          <label>Port
-            <input type="number" value={port} onChange={(e) => setPort(e.target.value)} />
-          </label>
-          <label>Room name
-            <input value={room} onChange={(e) => setRoom(e.target.value)} />
+          <label>Room name (from the host)
+            <input value={room} onChange={(e) => setRoom(e.target.value)} required />
           </label>
           <label>Room password (if set)
             <input value={password} onChange={(e) => setPassword(e.target.value)} />

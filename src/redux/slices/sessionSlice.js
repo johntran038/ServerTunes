@@ -7,8 +7,6 @@ import { createSlice } from '@reduxjs/toolkit';
  */
 const initialState = {
   role: null, // 'host' | 'guest' | null
-  host: '', // ip/hostname a guest connects to
-  port: 8080,
   room: 'main',
   password: '',
   displayName: '',
@@ -22,10 +20,8 @@ const sessionSlice = createSlice({
   initialState,
   reducers: {
     startHosting(state, action) {
-      const { port, room, password, displayName } = action.payload;
+      const { room, password, displayName } = action.payload;
       state.role = 'host';
-      state.host = 'localhost';
-      state.port = port || 8080;
       state.room = room || 'main';
       state.password = password || '';
       state.displayName = displayName || 'Host';
@@ -33,10 +29,8 @@ const sessionSlice = createSlice({
       state.error = '';
     },
     startJoining(state, action) {
-      const { host, port, room, password, displayName } = action.payload;
+      const { room, password, displayName } = action.payload;
       state.role = 'guest';
-      state.host = host || '';
-      state.port = port || 8080;
       state.room = room || 'main';
       state.password = password || '';
       state.displayName = displayName || 'Guest';

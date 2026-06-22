@@ -33,15 +33,29 @@ function loadYouTubeApi() {
  *                 can't drive their own player - the host is in control.
  *   onStateChange (ytState) => void
  *   onReady       () => void
+ *   onEnded       () => void
+ *   onError       (code) => void   YT error codes: 2, 5, 100, 101, 150
  */
 const YouTubePlayer = forwardRef(function YouTubePlayer(
-  { controllable = true, onStateChange, onReady, onEnded },
+  { controllable = true, onStateChange, onReady, onEnded, onError },
   ref,
 ) {
   const containerRef = useRef(null);
   const playerRef = useRef(null);
   const readyRef = useRef(false);
   const pendingRef = useRef(null); // {videoId, startSeconds, autoplay}
+
+  // Keep the latest callbacks in refs. The YT player is created once, so its
+  // event handlers would otherwise capture stale props (e.g. an empty
+  // playlist for onEnded). Reading through refs always calls the latest.
+  const onStateChangeRef = useRef(onStateChange);
+  const onReadyRef = useRef(onReady);
+  const onEndedRef = useRef(onEnded);
+  const onErrorRef = useRef(onError);
+  useEffect(() => { onStateChangeRef.current = onStateChange; }, [onStateChange]);
+  useEffect(() => { onReadyRef.current = onReady; }, [onReady]);
+  useEffect(() => { onEndedRef.current = onEnded; }, [onEnded]);
+  useEffect(() => { onErrorRef.current = onError; }, [onError]);
 
   useEffect(() => {
     let destroyed = false;
@@ -70,12 +84,17 @@ const YouTubePlayer = forwardRef(function YouTubePlayer(
                 playerRef.current.cueVideoById({ videoId, startSeconds });
               }
             }
-            if (onReady) onReady();
+            if (onReadyRef.current) onReadyRef.current();
           },
           onStateChange: (e) => {
-            if (onStateChange) onStateChange(e.data);
+            if (onStateChangeRef.current) onStateChangeRef.current(e.data);
             // YT.PlayerState.ENDED === 0
-            if (e.data === 0 && onEnded) onEnded();
+            if (e.data === 0 && onEndedRef.current) onEndedRef.current();
+          },
+          // Fired when a video can't be played: 2 (bad id), 5 (HTML5 error),
+          // 100 (removed/private), 101 & 150 (embedding disabled by owner).
+          onError: (e) => {
+            if (onErrorRef.current) onErrorRef.current(e.data);
           },
         },
       });
