@@ -4,6 +4,12 @@ import { useNavigate } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
 import YouTubePlayer from '../components/YouTubePlayer';
 import useConnection from '../hooks/useConnection';
+import { FaPlay } from "react-icons/fa";
+import { FaArrowUpLong } from "react-icons/fa6";
+import { FaArrowDownLong } from "react-icons/fa6";
+import { ImCross } from "react-icons/im";
+import { RxLoop } from "react-icons/rx";
+import { PiNumberCircleOneBold } from "react-icons/pi";
 import {
   addTrack, removeTrack, moveTrack, setCurrentIndex,
   updateTrack, appendPlaylist, clearPlaylist,
@@ -41,6 +47,13 @@ const Host = () => {
   const [urlInput, setUrlInput] = useState('');
   const [addError, setAddError] = useState('');
   const [playbackNote, setPlaybackNote] = useState('');
+
+  // End-of-song behavior toggles.
+  //   loopCurrent: re-play the current track when it ends.
+  //   stopAtEnd:   stop instead of advancing to the next track.
+  // If both are on, loopCurrent wins (handleNext checks it first).
+  const [loopCurrent, setLoopCurrent] = useState(false);
+  const [stopAtEnd, setStopAtEnd] = useState(false);
 
   // Volume the host wants guests to hear at (0-100). This is intentionally
   // separate from the host's own iframe volume, which we leave alone, so the
@@ -240,7 +253,6 @@ const Host = () => {
     }
   };
 
-
   const handleAddToPlaylist = async () => {
     const id = resolveInput();
     if (!id) return;
@@ -271,11 +283,39 @@ const Host = () => {
     });
   };
 
+  // Called on natural end-of-video (YT.PlayerState.ENDED). Honors the
+  // loop / stop-at-end toggles before falling back to advancing the queue.
+  // Loop wins when both toggles are on.
   const handleNext = useCallback(() => {
     if (items.length === 0) return;
+
+    if (loopCurrent) {
+      const np = nowPlayingRef.current;
+      if (np && playerRef.current) {
+        playerRef.current.load(np.videoId, 0, true);
+        broadcast({
+          videoId: np.videoId,
+          title: np.title,
+          displayTitle: np.displayTitle,
+          isPlaying: true,
+          position: 0,
+          timestamp: Date.now(),
+        });
+      }
+      return;
+    }
+
+    if (stopAtEnd) {
+      // Treat this song as the end of the playlist for the moment. The
+      // current video stays loaded so "Now playing" still reads correctly;
+      // guests are pushed into a paused state via the broadcast.
+      broadcast({ isPlaying: false });
+      return;
+    }
+
     const next = currentIndex + 1;
     if (next < items.length) handlePlayFromList(next);
-  }, [items, currentIndex]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [items, currentIndex, loopCurrent, stopAtEnd]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Called when the YouTube player can't play the current video.
   const handlePlayerError = useCallback((code) => {
@@ -376,6 +416,35 @@ const Host = () => {
               : 'Nothing playing yet'}
           </div>
           {playbackNote && <div className="banner error">{playbackNote}</div>}
+
+          <div className="playback-toggles">
+            <label>
+              <input
+                type="checkbox"
+                checked={loopCurrent}
+                onChange={(e) => setLoopCurrent(e.target.checked)}
+              />
+              Loop current song
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={stopAtEnd}
+                onChange={(e) => setStopAtEnd(e.target.checked)}
+              />
+              Stop after this song
+            </label>
+            <label>
+              {loopCurrent ? (
+                <RxLoop size="1.3rem"/>
+              ) : (
+                stopAtEnd && (
+                  <PiNumberCircleOneBold size="1.3rem"/>
+                )
+              )
+              }
+            </label>
+          </div>
 
           <div className="guest-volume">
             <label htmlFor="guest-volume-slider">Listener volume</label>
@@ -478,24 +547,24 @@ const Host = () => {
                         className="secondary"
                         onClick={() => handlePlayFromList(index)}
                         title="Play"
-                      >▶</button>
+                      ><FaPlay /></button>
                       <button
                         className="secondary"
                         onClick={() => dispatch(moveTrack({ from: index, to: index - 1 }))}
                         disabled={index === 0}
                         title="Up"
-                      >↑</button>
+                      ><FaArrowUpLong /></button>
                       <button
                         className="secondary"
                         onClick={() => dispatch(moveTrack({ from: index, to: index + 1 }))}
                         disabled={index === items.length - 1}
                         title="Down"
-                      >↓</button>
+                      ><FaArrowDownLong /></button>
                       <button
                         className="secondary"
                         onClick={() => dispatch(removeTrack(item.id))}
                         title="Remove"
-                      >✕</button>
+                      ><ImCross /></button>
                     </td>
                   </tr>
                 ))}
