@@ -16,7 +16,9 @@ import mqtt from 'mqtt';
  * NOTE: this is a public broker. The room password is an app-level check
  * embedded in payloads; anyone subscribed to the topic can read messages.
  *
- * Returns: { status, error, guestCount, send, close }
+ * Returns: { status, error, errorKind, guestCount, send, close }
+ *   errorKind === 'room-taken' means another host already owns this room
+ *   name (caller can route the user back to the setup form).
  */
 const BROKER_URL = 'wss://test.mosquitto.org:8081/mqtt';
 
@@ -31,6 +33,11 @@ const SWEEP_INTERVAL = 3000;     // host prunes stale guests every 3s
 // tab is closed without a chance to clean up. Broker disconnects after about
 // keepalive * 1.5 seconds of silence.
 const KEEPALIVE_SECONDS = 15;
+// How long the host probe waits for a retained "online" marker on the host
+// topic before deciding the room is free. Retained messages arrive on the
+// SUBACK round-trip, so this is generous on purpose; if nothing arrives in
+// this window we treat the room as available.
+const HOST_PROBE_MS = 1200;
 
 const newClientId = (role) =>
   `servertunes-${role}-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
@@ -45,6 +52,9 @@ export default function useConnection({
 }) {
   const [status, setStatus] = useState('idle'); // idle|connecting|connected|error|closed
   const [error, setError] = useState('');
+  // Coarse classification of `error` so callers can react differently (e.g.
+  // bounce back to the setup form on 'room-taken'). null when no error.
+  const [errorKind, setErrorKind] = useState(null);
   const [guestCount, setGuestCount] = useState(0);
 
   const clientRef = useRef(null);
@@ -90,184 +100,289 @@ export default function useConnection({
     closedByUserRef.current = false;
     guestsRef.current = new Map();
     setError('');
+    setErrorKind(null);
     setStatus('connecting');
     setGuestCount(0);
 
-    const clientId = newClientId(role);
+    // The teardown returned to React calls whatever `cleanup` is at the
+    // moment of unmount. Probe phase installs one cleanup; if the probe
+    // succeeds and we open the real client, that flow installs a richer
+    // one over the top.
+    let cleanup = () => {};
 
-    // Only the host needs LWT (to clear its retained 'online' on unclean drop).
-    // Guest disappearance is handled by heartbeat timeout on the host side.
-    const will = role === 'host'
-      ? { topic: hostTopic(room), payload: '', retain: true, qos: 0 }
-      : undefined;
+    // Opens the real (long-lived) MQTT connection for this role and wires
+    // up all the existing event handlers. For hosts, this only runs after
+    // the probe phase has decided the room name is free.
+    const startMainClient = () => {
+      const clientId = newClientId(role);
+      const will = role === 'host'
+        ? { topic: hostTopic(room), payload: '', retain: true, qos: 0 }
+        : undefined;
 
-    let client;
+      let client;
+      try {
+        client = mqtt.connect(BROKER_URL, {
+          clientId,
+          clean: true,
+          keepalive: KEEPALIVE_SECONDS,
+          reconnectPeriod: role === 'guest' ? 3000 : 0,
+          connectTimeout: 8000,
+          ...(will ? { will } : {}),
+        });
+      } catch (e) {
+        setError(`Could not open broker connection: ${e.message}`);
+        setErrorKind('broker');
+        setStatus('error');
+        return;
+      }
+      clientRef.current = client;
+
+      client.on('connect', () => {
+        if (role === 'host') {
+          client.subscribe(presenceTopic(room), { qos: 0 }, (err) => {
+            if (err) {
+              setError(`Subscribe failed: ${err.message}`);
+              setErrorKind('subscribe');
+              setStatus('error');
+              return;
+            }
+            client.publish(hostTopic(room), 'online', { qos: 0, retain: true });
+            setStatus('connected');
+
+            // Sweep stale guests on a timer.
+            sweepTimerRef.current = setInterval(() => {
+              const now = Date.now();
+              let changed = false;
+              for (const [id, lastSeen] of guestsRef.current) {
+                if (now - lastSeen > PRESENCE_TIMEOUT) {
+                  guestsRef.current.delete(id);
+                  changed = true;
+                }
+              }
+              if (changed) setGuestCount(guestsRef.current.size);
+            }, SWEEP_INTERVAL);
+          });
+        } else {
+          client.subscribe([stateTopic(room), hostTopic(room)], { qos: 0 }, (err) => {
+            if (err) {
+              setError(`Subscribe failed: ${err.message}`);
+              setErrorKind('subscribe');
+              setStatus('error');
+              return;
+            }
+            setStatus('connected');
+
+            const beat = () => {
+              if (!client.connected) return;
+              client.publish(
+                presenceTopic(room),
+                JSON.stringify({ type: 'hello', id: clientId }),
+                { qos: 0, retain: false },
+              );
+            };
+            beat(); // announce immediately so the host counts us right away
+            heartbeatTimerRef.current = setInterval(beat, HEARTBEAT_INTERVAL);
+          });
+        }
+      });
+
+      client.on('reconnect', () => {
+        if (!closedByUserRef.current) setStatus('connecting');
+      });
+
+      client.on('close', () => {
+        if (closedByUserRef.current) return;
+        setStatus('connecting');
+      });
+
+      client.on('error', (err) => {
+        setError(`Broker error: ${err.message || err}`);
+        setErrorKind('broker');
+        setStatus('error');
+      });
+
+      client.on('message', (topic, payload) => {
+        const text = payload.toString();
+
+        if (role === 'host') {
+          if (topic === presenceTopic(room)) {
+            let msg;
+            try { msg = JSON.parse(text); } catch { return; }
+            if (!msg || !msg.id) return;
+
+            if (msg.type === 'bye') {
+              if (guestsRef.current.delete(msg.id)) {
+                setGuestCount(guestsRef.current.size);
+              }
+            } else if (msg.type === 'hello') {
+              const isNew = !guestsRef.current.has(msg.id);
+              guestsRef.current.set(msg.id, Date.now());
+              if (isNew) setGuestCount(guestsRef.current.size);
+            }
+          }
+          return;
+        }
+
+        // guest
+        if (topic === stateTopic(room)) {
+          if (!text) {
+            // Empty retained on the state topic means the host cleared it
+            // (graceful end). Treat the same as the host going offline so
+            // the guest's player stops instead of sitting on the last frame.
+            if (onHostLeftRef.current) onHostLeftRef.current();
+            setStatus('closed');
+            return;
+          }
+          let msg;
+          try { msg = JSON.parse(text); } catch { return; }
+          if ((msg.password || '') !== (password || '')) {
+            setError('Wrong room password.');
+            setErrorKind('password');
+            setStatus('error');
+            return;
+          }
+          // A valid state payload means the host is alive. Clear any stale
+          // "host ended the session" error and reset status so the UI flips
+          // back out of the "host left" presentation when they return.
+          setError('');
+          setErrorKind(null);
+          setStatus('connected');
+          if (onStateRef.current && msg.payload) onStateRef.current(msg.payload);
+          return;
+        }
+        if (topic === hostTopic(room)) {
+          if (text === 'online') {
+            // Host (re)joined. Clear any leftover host-left error/status so
+            // the UI returns to normal even before the next state arrives.
+            setError('');
+            setErrorKind(null);
+            setStatus('connected');
+            return;
+          }
+          if (onHostLeftRef.current) onHostLeftRef.current();
+          setError('The host ended the session.');
+          setErrorKind('host-left');
+          setStatus('closed');
+        }
+      });
+
+      cleanup = () => {
+        if (heartbeatTimerRef.current) {
+          clearInterval(heartbeatTimerRef.current);
+          heartbeatTimerRef.current = null;
+        }
+        if (sweepTimerRef.current) {
+          clearInterval(sweepTimerRef.current);
+          sweepTimerRef.current = null;
+        }
+        // Send the goodbye publishes, then close with force=false so they
+        // actually get flushed to the broker before the socket goes away.
+        // Using force=true here discards the publishes, leaving guests stuck
+        // on the last frame after End session.
+        try {
+          if (role === 'host') {
+            client.publish(hostTopic(room), '', { qos: 0, retain: true });
+            client.publish(stateTopic(room), '', { qos: 0, retain: true });
+          } else if (role === 'guest') {
+            client.publish(
+              presenceTopic(room),
+              JSON.stringify({ type: 'bye', id: clientId }),
+            );
+          }
+        } catch { /* ignore */ }
+        try { client.end(false); } catch { /* ignore */ }
+        clientRef.current = null;
+      };
+    };
+
+    // Guests skip the probe entirely - they just connect and start listening.
+    if (role !== 'host') {
+      startMainClient();
+      return () => cleanup();
+    }
+
+    // ---- Host probe phase ----
+    // Public broker means anyone can claim a room name. Before we publish
+    // 'online' on the host topic, peek at its retained value to see if
+    // someone else is already advertising this room. The probe deliberately
+    // does NOT set a Last Will: an unclean drop while probing must not be
+    // able to clear the real host's retained marker.
+    let resolved = false;
+    let cancelled = false;
+    let probeClient;
     try {
-      client = mqtt.connect(BROKER_URL, {
-        clientId,
+      probeClient = mqtt.connect(BROKER_URL, {
+        clientId: newClientId('probe'),
         clean: true,
         keepalive: KEEPALIVE_SECONDS,
-        reconnectPeriod: role === 'guest' ? 3000 : 0,
+        reconnectPeriod: 0,
         connectTimeout: 8000,
-        ...(will ? { will } : {}),
       });
     } catch (e) {
       setError(`Could not open broker connection: ${e.message}`);
+      setErrorKind('broker');
       setStatus('error');
       return undefined;
     }
-    clientRef.current = client;
 
-    client.on('connect', () => {
-      if (role === 'host') {
-        client.subscribe(presenceTopic(room), { qos: 0 }, (err) => {
-          if (err) {
-            setError(`Subscribe failed: ${err.message}`);
-            setStatus('error');
-            return;
-          }
-          client.publish(hostTopic(room), 'online', { qos: 0, retain: true });
-          setStatus('connected');
+    const closeProbe = () => {
+      try { probeClient.end(true); } catch { /* ignore */ }
+    };
 
-          // Sweep stale guests on a timer.
-          sweepTimerRef.current = setInterval(() => {
-            const now = Date.now();
-            let changed = false;
-            for (const [id, lastSeen] of guestsRef.current) {
-              if (now - lastSeen > PRESENCE_TIMEOUT) {
-                guestsRef.current.delete(id);
-                changed = true;
-              }
-            }
-            if (changed) setGuestCount(guestsRef.current.size);
-          }, SWEEP_INTERVAL);
-        });
-      } else {
-        client.subscribe([stateTopic(room), hostTopic(room)], { qos: 0 }, (err) => {
-          if (err) {
-            setError(`Subscribe failed: ${err.message}`);
-            setStatus('error');
-            return;
-          }
-          setStatus('connected');
+    const probeTimer = setTimeout(() => {
+      if (resolved) return;
+      resolved = true;
+      closeProbe();
+      if (cancelled) return;
+      startMainClient();
+    }, HOST_PROBE_MS);
 
-          const beat = () => {
-            if (!client.connected) return;
-            client.publish(
-              presenceTopic(room),
-              JSON.stringify({ type: 'hello', id: clientId }),
-              { qos: 0, retain: false },
-            );
-          };
-          beat(); // announce immediately so the host counts us right away
-          heartbeatTimerRef.current = setInterval(beat, HEARTBEAT_INTERVAL);
-        });
+    probeClient.on('connect', () => {
+      if (resolved) return;
+      probeClient.subscribe(hostTopic(room), { qos: 0 }, (err) => {
+        if (resolved || !err) return;
+        resolved = true;
+        clearTimeout(probeTimer);
+        closeProbe();
+        setError(`Subscribe failed: ${err.message}`);
+        setErrorKind('subscribe');
+        setStatus('error');
+      });
+    });
+
+    probeClient.on('message', (topic, payload) => {
+      if (resolved) return;
+      if (topic === hostTopic(room) && payload.toString() === 'online') {
+        resolved = true;
+        clearTimeout(probeTimer);
+        closeProbe();
+        setError('That room name is already taken. Pick a different one.');
+        setErrorKind('room-taken');
+        setStatus('error');
       }
     });
 
-    client.on('reconnect', () => {
-      if (!closedByUserRef.current) setStatus('connecting');
-    });
-
-    client.on('close', () => {
-      if (closedByUserRef.current) return;
-      setStatus('connecting');
-    });
-
-    client.on('error', (err) => {
+    probeClient.on('error', (err) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(probeTimer);
+      closeProbe();
       setError(`Broker error: ${err.message || err}`);
+      setErrorKind('broker');
       setStatus('error');
     });
 
-    client.on('message', (topic, payload) => {
-      const text = payload.toString();
-
-      if (role === 'host') {
-        if (topic === presenceTopic(room)) {
-          let msg;
-          try { msg = JSON.parse(text); } catch { return; }
-          if (!msg || !msg.id) return;
-
-          if (msg.type === 'bye') {
-            if (guestsRef.current.delete(msg.id)) {
-              setGuestCount(guestsRef.current.size);
-            }
-          } else if (msg.type === 'hello') {
-            const isNew = !guestsRef.current.has(msg.id);
-            guestsRef.current.set(msg.id, Date.now());
-            if (isNew) setGuestCount(guestsRef.current.size);
-          }
-        }
-        return;
+    cleanup = () => {
+      cancelled = true;
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(probeTimer);
+        closeProbe();
       }
-
-      // guest
-      if (topic === stateTopic(room)) {
-        if (!text) {
-          // Empty retained on the state topic means the host cleared it
-          // (graceful end). Treat the same as the host going offline so
-          // the guest's player stops instead of sitting on the last frame.
-          if (onHostLeftRef.current) onHostLeftRef.current();
-          setStatus('closed');
-          return;
-        }
-        let msg;
-        try { msg = JSON.parse(text); } catch { return; }
-        if ((msg.password || '') !== (password || '')) {
-          setError('Wrong room password.');
-          setStatus('error');
-          return;
-        }
-        // A valid state payload means the host is alive. Clear any stale
-        // "host ended the session" error and reset status so the UI flips
-        // back out of the "host left" presentation when they return.
-        setError('');
-        setStatus('connected');
-        if (onStateRef.current && msg.payload) onStateRef.current(msg.payload);
-        return;
-      }
-      if (topic === hostTopic(room)) {
-        if (text === 'online') {
-          // Host (re)joined. Clear any leftover host-left error/status so
-          // the UI returns to normal even before the next state arrives.
-          setError('');
-          setStatus('connected');
-          return;
-        }
-        if (onHostLeftRef.current) onHostLeftRef.current();
-        setError('The host ended the session.');
-        setStatus('closed');
-      }
-    });
-
-    return () => {
-      if (heartbeatTimerRef.current) {
-        clearInterval(heartbeatTimerRef.current);
-        heartbeatTimerRef.current = null;
-      }
-      if (sweepTimerRef.current) {
-        clearInterval(sweepTimerRef.current);
-        sweepTimerRef.current = null;
-      }
-      // Send the goodbye publishes, then close with force=false so they
-      // actually get flushed to the broker before the socket goes away.
-      // Using force=true here (the previous behaviour) discarded the
-      // publishes, leaving guests stuck on the last frame after End session.
-      try {
-        if (role === 'host') {
-          client.publish(hostTopic(room), '', { qos: 0, retain: true });
-          client.publish(stateTopic(room), '', { qos: 0, retain: true });
-        } else if (role === 'guest') {
-          client.publish(
-            presenceTopic(room),
-            JSON.stringify({ type: 'bye', id: clientId }),
-          );
-        }
-      } catch { /* ignore */ }
-      try { client.end(false); } catch { /* ignore */ }
-      clientRef.current = null;
     };
+
+    return () => cleanup();
   }, [enabled, role, room, password]);
 
-  return { status, error, guestCount, send, close };
+  return { status, error, errorKind, guestCount, send, close };
 }

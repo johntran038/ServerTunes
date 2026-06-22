@@ -39,6 +39,10 @@ const Host = () => {
   const [room, setRoom] = useState('main');
   const [password, setPassword] = useState('');
   const [displayName, setDisplayName] = useState('Host');
+  // Surfaced on the setup form when a previous "Start hosting" attempt was
+  // bounced back (e.g. the room name was already in use). Local state so it
+  // survives across the role flip back to null.
+  const [setupError, setSetupError] = useState('');
 
   // --- playback state ---
   // nowPlaying carries both the canonical title and the friendlier
@@ -78,12 +82,23 @@ const Host = () => {
   const wantsPlayingRef = useRef(false);
   const lastVisibleRef = useRef({ position: 0, timestamp: Date.now() });
 
-  const { status, error, guestCount, send } = useConnection({
+  const { status, error, errorKind, guestCount, send } = useConnection({
     role: isHosting ? 'host' : null,
     room: session.room,
     password: session.password,
     enabled: isHosting,
   });
+
+  // The hook detected someone else already hosting this room name. Bounce
+  // the user back to the setup form with the explanation - more helpful
+  // than leaving them on a half-rendered hosting screen with a banner.
+  useEffect(() => {
+    if (!isHosting) return;
+    if (errorKind === 'room-taken') {
+      setSetupError(error || 'That room name is already taken. Pick a different one.');
+      dispatch(leaveSession());
+    }
+  }, [isHosting, errorKind, error, dispatch]);
 
   // Broadcast current playback state to all guests.
   const broadcast = useCallback((override = {}) => {
@@ -217,6 +232,7 @@ const Host = () => {
 
   const handleStartHosting = (e) => {
     e.preventDefault();
+    setSetupError('');
     dispatch(startHosting({ room, password, displayName }));
   };
 
@@ -374,6 +390,7 @@ const Host = () => {
         <button className="link-back" onClick={() => navigate('/')}>&larr; Back</button>
         <h1>Host a session</h1>
         <p className="tagline">Sync runs through the public test.mosquitto.org broker. No port forwarding needed.</p>
+        {setupError && <div className="banner error">{setupError}</div>}
         <form className="form" onSubmit={handleStartHosting}>
           <label>Display name
             <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
