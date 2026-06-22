@@ -120,3 +120,21 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .yt-guard { position: absolute; inset: 0; cursor: not-allowed; }
 
 .join-stage { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+
+.host-gone {
+  width: 100%;
+  max-width: 640px;
+  aspect-ratio: 16 / 9;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: #000;
+  border: 1px solid #2a2f3d;
+  border-radius: 12px;
+  text-align: center;
+  padding: 16px;
+}
+.host-gone-title { font-size: 1.1rem; font-weight: 600; }
+.host-gone-sub { color: var(--muted); font-size: 0.9rem; }

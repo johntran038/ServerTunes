@@ -27,6 +27,10 @@ const presenceTopic = (room) => `servertunes/${room}/presence`;
 const HEARTBEAT_INTERVAL = 5000; // guests publish "hello" every 5s
 const PRESENCE_TIMEOUT = 12000;  // host drops guests after 12s of silence
 const SWEEP_INTERVAL = 3000;     // host prunes stale guests every 3s
+// Short keepalive so the broker fires the host's Last Will quickly when the
+// tab is closed without a chance to clean up. Broker disconnects after about
+// keepalive * 1.5 seconds of silence.
+const KEEPALIVE_SECONDS = 15;
 
 const newClientId = (role) =>
   `servertunes-${role}-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
@@ -73,6 +77,7 @@ export default function useConnection({
     } else if (role === 'guest') {
       c.publish(presenceTopic(room), JSON.stringify({ type: 'bye', id: c.options.clientId }));
     }
+    // force=false lets the goodbye publishes flush before the socket closes.
     c.end(false, () => {
       clientRef.current = null;
       setStatus('closed');
@@ -101,6 +106,7 @@ export default function useConnection({
       client = mqtt.connect(BROKER_URL, {
         clientId,
         clean: true,
+        keepalive: KEEPALIVE_SECONDS,
         reconnectPeriod: role === 'guest' ? 3000 : 0,
         connectTimeout: 8000,
         ...(will ? { will } : {}),
@@ -196,8 +202,15 @@ export default function useConnection({
       }
 
       // guest
-            if (topic === stateTopic(room)) {
-        if (!text) return; // empty retained = host cleared
+      if (topic === stateTopic(room)) {
+        if (!text) {
+          // Empty retained on the state topic means the host cleared it
+          // (graceful end). Treat the same as the host going offline so
+          // the guest's player stops instead of sitting on the last frame.
+          if (onHostLeftRef.current) onHostLeftRef.current();
+          setStatus('closed');
+          return;
+        }
         let msg;
         try { msg = JSON.parse(text); } catch { return; }
         if ((msg.password || '') !== (password || '')) {
@@ -205,15 +218,25 @@ export default function useConnection({
           setStatus('error');
           return;
         }
+        // A valid state payload means the host is alive. Clear any stale
+        // "host ended the session" error and reset status so the UI flips
+        // back out of the "host left" presentation when they return.
+        setError('');
+        setStatus('connected');
         if (onStateRef.current && msg.payload) onStateRef.current(msg.payload);
         return;
       }
       if (topic === hostTopic(room)) {
-        if (text !== 'online') {
-          if (onHostLeftRef.current) onHostLeftRef.current();
-          setError('The host ended the session.');
-          setStatus('closed');
+        if (text === 'online') {
+          // Host (re)joined. Clear any leftover host-left error/status so
+          // the UI returns to normal even before the next state arrives.
+          setError('');
+          setStatus('connected');
+          return;
         }
+        if (onHostLeftRef.current) onHostLeftRef.current();
+        setError('The host ended the session.');
+        setStatus('closed');
       }
     });
 
@@ -226,6 +249,10 @@ export default function useConnection({
         clearInterval(sweepTimerRef.current);
         sweepTimerRef.current = null;
       }
+      // Send the goodbye publishes, then close with force=false so they
+      // actually get flushed to the broker before the socket goes away.
+      // Using force=true here (the previous behaviour) discarded the
+      // publishes, leaving guests stuck on the last frame after End session.
       try {
         if (role === 'host') {
           client.publish(hostTopic(room), '', { qos: 0, retain: true });
@@ -237,7 +264,7 @@ export default function useConnection({
           );
         }
       } catch { /* ignore */ }
-      try { client.end(true); } catch { /* ignore */ }
+      try { client.end(false); } catch { /* ignore */ }
       clientRef.current = null;
     };
   }, [enabled, role, room, password]);

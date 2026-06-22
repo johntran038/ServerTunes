@@ -39,6 +39,17 @@ const Host = () => {
   const nowPlayingRef = useRef(nowPlaying);
   useEffect(() => { nowPlayingRef.current = nowPlaying; }, [nowPlaying]);
 
+  // Tab-visibility plumbing.
+  // wantsPlayingRef captures what the HOST last intended (play/pause from a
+  // user action), as opposed to what the iframe currently reports - browsers
+  // auto-pause backgrounded iframes and we don't want that pause to silence
+  // every guest in the room.
+  // lastVisibleRef snapshots the last (position, timestamp) we observed
+  // while the tab was visible, so heartbeats sent while hidden can project
+  // the position forward instead of broadcasting a frozen one.
+  const wantsPlayingRef = useRef(false);
+  const lastVisibleRef = useRef({ position: 0, timestamp: Date.now() });
+
   const { status, error, guestCount, send } = useConnection({
     role: isHosting ? 'host' : null,
     room: session.room,
@@ -52,14 +63,46 @@ const Host = () => {
     const np = nowPlayingRef.current;
     if (!np) return;
     const ytState = player ? player.getState() : -1;
+
+    let isPlaying;
+    let position;
+    if (typeof document !== 'undefined' && document.hidden) {
+      // Tab is in the background. The iframe may be auto-paused or its
+      // currentTime may be frozen, so don't trust either. Stick with our
+      // last known intent and project the playback head forward by the
+      // wall-clock time elapsed since we last saw a fresh value.
+      isPlaying = wantsPlayingRef.current;
+      const since = (Date.now() - lastVisibleRef.current.timestamp) / 1000;
+      position = lastVisibleRef.current.position + (isPlaying ? since : 0);
+    } else {
+      isPlaying = ytState === PLAYING;
+      position = player ? player.getTime() : 0;
+      wantsPlayingRef.current = isPlaying;
+      lastVisibleRef.current = { position, timestamp: Date.now() };
+    }
+
     const payload = {
       videoId: np.videoId,
       title: np.title,
-      isPlaying: ytState === PLAYING,
-      position: player ? player.getTime() : 0,
+      isPlaying,
+      position,
       timestamp: Date.now(),
       ...override,
     };
+
+    // If the caller explicitly overrode play state or position (e.g.
+    // playVideo, handlePlayerError), make those values the new baseline
+    // we project from.
+    if (override.isPlaying !== undefined) {
+      wantsPlayingRef.current = override.isPlaying;
+    }
+    if (override.position !== undefined) {
+      lastVisibleRef.current = {
+        position: override.position,
+        timestamp: payload.timestamp,
+      };
+    }
+
     send({ type: 'state', payload });
   }, [send]);
 
@@ -69,6 +112,30 @@ const Host = () => {
     const id = setInterval(() => broadcast(), 3000);
     return () => clearInterval(id);
   }, [status, broadcast]);
+
+  // When the host returns to this tab from another, the iframe may have
+  // been auto-paused while away. If the host was supposed to be playing,
+  // jump forward to where guests have been listening (their local clocks
+  // kept moving) and resume so nobody had to wait for the host.
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.hidden) return;
+      const player = playerRef.current;
+      if (!player || !nowPlayingRef.current) return;
+      if (wantsPlayingRef.current) {
+        const projected = lastVisibleRef.current.position +
+          (Date.now() - lastVisibleRef.current.timestamp) / 1000;
+        try { player.seek(projected, true); } catch { /* ignore */ }
+        if (player.getState() !== PLAYING) {
+          try { player.play(); } catch { /* ignore */ }
+        }
+      }
+      // Refresh everyone now that we're visible and authoritative again.
+      broadcast();
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
+  }, [broadcast]);
 
   const playVideo = useCallback((videoId, title) => {
     setPlaybackNote('');
@@ -140,6 +207,14 @@ const Host = () => {
     if (items.length > 0 && next < items.length) handlePlayFromList(next);
   }, [broadcast, items, currentIndex]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Don't broadcast a "paused" event that fired only because the tab went
+  // hidden (i.e. the browser auto-paused the iframe). While visible we
+  // forward every state change so user play/pause clicks still reach guests.
+  const handlePlayerStateChange = useCallback(() => {
+    if (typeof document !== 'undefined' && document.hidden) return;
+    broadcast();
+  }, [broadcast]);
+
   // CSV import/export
   const handleExport = () => {
     downloadCsv('servertunes-playlist.csv', playlistToCsv(items));
@@ -202,7 +277,7 @@ const Host = () => {
           <YouTubePlayer
             ref={playerRef}
             controllable
-            onStateChange={() => broadcast()}
+            onStateChange={handlePlayerStateChange}
             onEnded={handleNext}
             onError={handlePlayerError}
           />

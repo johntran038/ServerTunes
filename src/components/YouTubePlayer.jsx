@@ -25,8 +25,8 @@ function loadYouTubeApi() {
 
 /**
  * Thin wrapper around the YouTube IFrame player exposing an imperative API
- * via ref: load(videoId, startSeconds), play(), pause(), seek(seconds),
- * getTime(), getState(), getDuration().
+ * via ref: load(videoId, startSeconds), play(), pause(), stop(), seek(seconds),
+ * getTime(), getState(), getDuration(), mute/unMute/isMuted/setVolume.
  *
  * Props:
  *   controllable  when false (guests) pointer events are disabled so users
@@ -132,6 +132,15 @@ const YouTubePlayer = forwardRef(function YouTubePlayer(
     pause() {
       if (readyRef.current && playerRef.current) playerRef.current.pauseVideo();
     },
+    // Stops playback and unloads the current video. Used when the host leaves
+    // so the guest doesn't sit on the last frame.
+    stop() {
+      if (readyRef.current && playerRef.current) {
+        try { playerRef.current.stopVideo(); } catch { /* ignore */ }
+      }
+      // Drop any queued load so a stale video can't pop up after stop.
+      pendingRef.current = null;
+    },
     seek(seconds, allowSeekAhead = true) {
       if (readyRef.current && playerRef.current) {
         playerRef.current.seekTo(seconds, allowSeekAhead);
@@ -154,6 +163,23 @@ const YouTubePlayer = forwardRef(function YouTubePlayer(
         return playerRef.current.getPlayerState();
       }
       return -1;
+    },
+    mute() {
+      if (readyRef.current && playerRef.current) playerRef.current.mute();
+    },
+    unMute() {
+      if (readyRef.current && playerRef.current) playerRef.current.unMute();
+    },
+    isMuted() {
+      if (readyRef.current && playerRef.current) {
+        return playerRef.current.isMuted();
+      }
+      return false;
+    },
+    setVolume(v) {
+      if (readyRef.current && playerRef.current) {
+        playerRef.current.setVolume(Math.max(0, Math.min(100, v)));
+      }
     },
     isReady() {
       return readyRef.current;
