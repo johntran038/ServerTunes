@@ -1,11 +1,13 @@
+/* src/App.css */
 :root {
   --bg: #0f1117;
   --panel: #181b24;
   --panel-2: #20242f;
   --accent: #7c5cff;
   --accent-2: #00d3a7;
+  --accent-3: #7a7a7a;
   --text: #e8eaf0;
-  --muted: #99a;
+  --muted: rgb(88, 88, 168);
   --danger: #ff5d6c;
 }
 
@@ -78,6 +80,7 @@ button {
 button:hover:not(:disabled) { border-color: var(--accent); }
 button:disabled { opacity: 0.4; cursor: not-allowed; }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+button.secondary { background: var(--accent-3); border-color: var(--accent-3); color: #fff; font-weight: 600; }
 .link-back { background: none; border: none; color: var(--muted); padding: 0 0 12px; }
 
 /* Bars / status */
@@ -99,25 +102,121 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .add-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .add-row input { flex: 1; min-width: 200px; background: var(--panel); border: 1px solid #2a2f3d; border-radius: 8px; padding: 10px; color: var(--text); }
 
+/* Listener volume control on the host. Sets what guests hear; the host's
+   own iframe volume is left alone. */
+.guest-volume {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 4px 0 6px;
+}
+.guest-volume label {
+  color: var(--muted);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+.guest-volume input[type="range"] {
+  flex: 1;
+  max-width: 320px;
+  accent-color: var(--accent);
+}
+.guest-volume-readout {
+  color: var(--muted);
+  font-size: 0.85rem;
+  min-width: 40px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 .playlist-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
 .playlist-actions { display: flex; gap: 6px; flex-wrap: wrap; }
-.playlist { list-style: none; padding: 0; margin: 12px 0 0; }
-.playlist li {
-  display: flex; justify-content: space-between; align-items: center; gap: 10px;
-  background: var(--panel); border: 1px solid #232838; border-radius: 8px;
-  padding: 8px 12px; margin-bottom: 6px;
+
+/* Playlist as a 4-column table */
+.empty-playlist { margin-top: 12px; text-align: center; }
+
+.playlist-table {
+  width: 100%;
+  margin-top: 12px;
+  border-collapse: separate;
+  border-spacing: 0 6px;
+  table-layout: fixed;
 }
-.playlist li.active { border-color: var(--accent); }
-.playlist li.empty { color: var(--muted); justify-content: center; }
-.track-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
-.track-controls { display: flex; gap: 4px; }
-.track-controls button { padding: 4px 8px; font-size: 0.8rem; }
+.playlist-table th {
+  text-align: left;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 500;
+  padding: 0 8px 4px;
+}
+.playlist-table th:nth-child(1),
+.playlist-table td:nth-child(1) { width: 24%; }
+.playlist-table th:nth-child(2),
+.playlist-table td:nth-child(2) { width: 22%; }
+.playlist-table th:nth-child(3),
+.playlist-table td:nth-child(3) { width: 22%; }
+.playlist-table th:nth-child(4),
+.playlist-table td:nth-child(4) { width: 32%; }
+
+.playlist-table tbody td {
+  background: var(--panel);
+  border-top: 1px solid #3a4055;
+  border-bottom: 1px solid #3a4055;
+  padding: 8px;
+  vertical-align: middle;
+}
+.playlist-table tbody td:first-child {
+  border-left: 1px solid #3a4055;
+  border-top-left-radius: 8px;
+  border-bottom-left-radius: 8px;
+}
+.playlist-table tbody td:last-child {
+  border-right: 1px solid #3a4055;
+  border-top-right-radius: 8px;
+  border-bottom-right-radius: 8px;
+}
+.playlist-table tbody tr.active td { border-color: var(--accent); }
+
+.playlist-table .cell-input {
+  width: 100%;
+  background: var(--panel-2);
+  border: 1px solid #2a2f3d;
+  border-radius: 6px;
+  padding: 6px 8px;
+  color: var(--text);
+  font-size: 0.9rem;
+}
+.playlist-table .cell-input:focus { outline: none; border-color: var(--accent); }
+
+.playlist-table .col-controls {
+  white-space: nowrap;
+  text-align: right;
+}
+.playlist-table .col-controls button {
+  padding: 4px 8px;
+  font-size: 0.8rem;
+  margin-left: 2px;
+}
 
 /* Player wrapper + guest guard */
 .yt-wrapper { position: relative; width: 100%; max-width: 640px; }
 .yt-wrapper > div { width: 100%; aspect-ratio: 16 / 9; }
 .yt-wrapper iframe { width: 100% !important; height: 100% !important; }
 .yt-guard { position: absolute; inset: 0; cursor: not-allowed; }
+
+/* Audio-only mode for guests: the iframe stays mounted (so audio keeps
+   playing and the YT API keeps responding), but the wrapper is yanked
+   offscreen and out of layout. We avoid `display: none`, which would cause
+   some browsers to unload/pause the iframe. */
+.yt-wrapper.yt-hidden {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  width: 320px;
+  max-width: none;
+  pointer-events: none;
+}
 
 .join-stage { display: flex; flex-direction: column; align-items: center; gap: 10px; }
 

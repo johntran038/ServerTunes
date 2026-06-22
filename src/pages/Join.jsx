@@ -1,3 +1,4 @@
+// src/pages/Join.jsx
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
@@ -8,6 +9,8 @@ import { startJoining, leaveSession } from '../redux/slices/sessionSlice';
 const PLAYING = 1;
 const DRIFT_TOLERANCE = 1.5; // seconds before we hard-seek a guest
 const MUTE_CHECK_INTERVAL = 750; // poll for YT auto-mute on the guest player
+
+const clampVolume = (v) => Math.max(0, Math.min(100, v));
 
 const Join = () => {
   const dispatch = useDispatch();
@@ -30,6 +33,9 @@ const Join = () => {
   // Latest host payload, kept around so we can re-apply it once the player
   // remounts after the host returns.
   const lastPayloadRef = useRef(null);
+  // Latest host-controlled volume (0-100). Drives ensureAudible / the
+  // gesture button so they never override the host's setting with 100.
+  const guestVolumeRef = useRef(100);
 
   // Try to keep the YT player audible. YouTube's cross-origin autoplay policy
   // will auto-mute fresh loads (host change, new track, fresh iframe). Calling
@@ -41,7 +47,7 @@ const Join = () => {
     if (!player || !player.isReady()) return;
     try {
       player.unMute();
-      player.setVolume(100);
+      player.setVolume(guestVolumeRef.current);
     } catch { /* ignore */ }
   }, []);
 
@@ -54,13 +60,31 @@ const Join = () => {
     lastPayloadRef.current = payload;
     setHostLeft(false);
 
+    // Track the host-controlled volume. Update the ref unconditionally so
+    // ensureAudible / the gesture handler use the right value, and push it
+    // to the player when ready so slider drags feel instant. The 750ms poll
+    // below is a backstop for the case where the iframe wasn't ready yet
+    // when this fired (e.g. immediately after a fresh load).
+    if (typeof payload.guestVolume === 'number') {
+      const v = clampVolume(payload.guestVolume);
+      guestVolumeRef.current = v;
+      const p = playerRef.current;
+      if (p && p.isReady()) {
+        try { p.setVolume(v); } catch { /* ignore */ }
+      }
+    }
+
     const player = playerRef.current;
     if (!player) return; // player is being remounted; the effect below will replay
 
     const elapsed = payload.isPlaying ? (Date.now() - payload.timestamp) / 1000 : 0;
     const targetTime = Math.max(0, payload.position + elapsed);
 
-    setNowPlaying({ videoId: payload.videoId, title: payload.title });
+    setNowPlaying({
+      videoId: payload.videoId,
+      title: payload.title,
+      displayTitle: payload.displayTitle,
+    });
 
     if (currentVideoRef.current !== payload.videoId) {
       currentVideoRef.current = payload.videoId;
@@ -110,6 +134,7 @@ const Join = () => {
       setNowPlaying(null);
       setNeedsGesture(false);
       setHostLeft(false);
+      guestVolumeRef.current = 100;
     }
   }, [isJoined]);
 
@@ -126,7 +151,9 @@ const Join = () => {
   }, [hostLeft, applyState]);
 
   // Poll the player. If the host is playing but YT has muted us (autoplay
-  // policy on a new iframe / new load), prompt the user to tap once.
+  // policy on a new iframe / new load), prompt the user to tap once. Also
+  // re-apply the host-controlled volume so a fresh-load default of 100
+  // doesn't sneak past us.
   useEffect(() => {
     if (!isJoined || hostLeft) return undefined;
     const id = setInterval(() => {
@@ -138,6 +165,7 @@ const Join = () => {
       } else if (!player.isMuted()) {
         setNeedsGesture(false);
       }
+      try { player.setVolume(guestVolumeRef.current); } catch { /* ignore */ }
     }, MUTE_CHECK_INTERVAL);
     return () => clearInterval(id);
   }, [isJoined, hostLeft]);
@@ -154,13 +182,13 @@ const Join = () => {
 
   // Browsers/YT block audible autoplay in cross-origin iframes without a
   // direct gesture. This handler IS that gesture: explicitly unmute, restore
-  // volume, then resume playback.
+  // to the host-set guest volume, then resume playback.
   const handleEnableAudio = () => {
     const player = playerRef.current;
     if (player) {
       try {
         player.unMute();
-        player.setVolume(100);
+        player.setVolume(guestVolumeRef.current);
         player.play();
       } catch { /* ignore */ }
     }
@@ -188,6 +216,10 @@ const Join = () => {
     );
   }
 
+  const nowPlayingLabel = nowPlaying
+    ? (nowPlaying.displayTitle || nowPlaying.title)
+    : null;
+
   return (
     <div className="page join">
       <header className="bar">
@@ -213,9 +245,13 @@ const Join = () => {
           </div>
         ) : (
           <>
-            <YouTubePlayer ref={playerRef} controllable={false} />
+            {/* Hidden so guests only hear the host - the iframe stays mounted
+                offscreen so audio keeps playing and we can still drive it. */}
+            <YouTubePlayer ref={playerRef} controllable={false} hidden />
             <div className="now-playing">
-              {nowPlaying ? `Now playing: ${nowPlaying.title}` : 'Waiting for the host to start...'}
+              {nowPlayingLabel
+                ? `Now playing: ${nowPlayingLabel}`
+                : 'Waiting for the host to start...'}
             </div>
             <p className="hint">Playback is controlled by the host.</p>
           </>

@@ -59,3 +59,23 @@ export function watchUrl(id) {
 export function makeRowId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
+
+/**
+ * Fetch a video's title via YouTube's oEmbed endpoint.
+ * No API key needed; returns null if the request fails or the video can't
+ * be embedded (private/removed/etc).
+ */
+export async function fetchYouTubeTitle(videoId) {
+  if (!isValidVideoId(videoId)) return null;
+  const endpoint = `https://www.youtube.com/oembed?url=${encodeURIComponent(
+    watchUrl(videoId),
+  )}&format=json`;
+  try {
+    const res = await fetch(endpoint);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return typeof data.title === 'string' ? data.title : null;
+  } catch {
+    return null;
+  }
+}

@@ -1,3 +1,4 @@
+// src/pages/Host.jsx
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
@@ -5,15 +6,20 @@ import YouTubePlayer from '../components/YouTubePlayer';
 import useConnection from '../hooks/useConnection';
 import {
   addTrack, removeTrack, moveTrack, setCurrentIndex,
-  replacePlaylist, appendPlaylist, clearPlaylist,
+  updateTrack, appendPlaylist, clearPlaylist,
 } from '../redux/slices/playlistSlice';
 import { startHosting, leaveSession } from '../redux/slices/sessionSlice';
-import { parseVideoId, watchUrl } from '../utils/youtube';
+import { parseVideoId, watchUrl, fetchYouTubeTitle } from '../utils/youtube';
 import { playlistToCsv, csvToPlaylist, downloadCsv } from '../utils/csv';
 
 // YouTube player states
 const PLAYING = 1;
 const PAUSED = 2;
+
+// Debounce window for slider-driven volume broadcasts. Long enough to coalesce
+// the firehose of input events you get while dragging, short enough that the
+// listener side feels live.
+const VOLUME_BROADCAST_DEBOUNCE = 80;
 
 const Host = () => {
   const dispatch = useDispatch();
@@ -29,10 +35,19 @@ const Host = () => {
   const [displayName, setDisplayName] = useState('Host');
 
   // --- playback state ---
-  const [nowPlaying, setNowPlaying] = useState(null); // { videoId, title }
+  // nowPlaying carries both the canonical title and the friendlier
+  // displayTitle so we can broadcast both to guests.
+  const [nowPlaying, setNowPlaying] = useState(null); // { videoId, title, displayTitle }
   const [urlInput, setUrlInput] = useState('');
   const [addError, setAddError] = useState('');
   const [playbackNote, setPlaybackNote] = useState('');
+
+  // Volume the host wants guests to hear at (0-100). This is intentionally
+  // separate from the host's own iframe volume, which we leave alone, so the
+  // host can adjust what listeners hear without changing what they hear.
+  const [guestVolume, setGuestVolume] = useState(100);
+  const guestVolumeRef = useRef(100);
+  useEffect(() => { guestVolumeRef.current = guestVolume; }, [guestVolume]);
 
   const playerRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -84,9 +99,14 @@ const Host = () => {
     const payload = {
       videoId: np.videoId,
       title: np.title,
+      displayTitle: np.displayTitle,
       isPlaying,
       position,
       timestamp: Date.now(),
+      // Always include the host-set guest volume so retained state carries
+      // it for late joiners. Read from the ref so this callback doesn't have
+      // to be re-bound (and the heartbeat re-started) on every slider tick.
+      guestVolume: guestVolumeRef.current,
       ...override,
     };
 
@@ -113,6 +133,14 @@ const Host = () => {
     return () => clearInterval(id);
   }, [status, broadcast]);
 
+  // Push slider changes to guests sooner than the 3s heartbeat. Debounce so
+  // a rapid drag doesn't fire one broker publish per input event.
+  useEffect(() => {
+    if (!nowPlayingRef.current) return undefined;
+    const id = setTimeout(() => broadcast(), VOLUME_BROADCAST_DEBOUNCE);
+    return () => clearTimeout(id);
+  }, [guestVolume, broadcast]);
+
   // When the host returns to this tab from another, the iframe may have
   // been auto-paused while away. If the host was supposed to be playing,
   // jump forward to where guests have been listening (their local clocks
@@ -137,13 +165,41 @@ const Host = () => {
     return () => document.removeEventListener('visibilitychange', handleVisibility);
   }, [broadcast]);
 
-  const playVideo = useCallback((videoId, title) => {
+  // Keep nowPlaying in sync with the current playlist row when the host
+  // edits its title / displayTitle inline. The next heartbeat will then
+  // broadcast the new values to guests.
+  useEffect(() => {
+    setNowPlaying((prev) => {
+      if (!prev) return prev;
+      const match = items.find((it) => it.videoId === prev.videoId);
+      if (!match) return prev;
+      if (match.title === prev.title && match.displayTitle === prev.displayTitle) {
+        return prev;
+      }
+      return { ...prev, title: match.title, displayTitle: match.displayTitle };
+    });
+  }, [items]);
+
+  const playVideo = useCallback((track) => {
     setPlaybackNote('');
-    setNowPlaying({ videoId, title });
-    nowPlayingRef.current = { videoId, title };
-    if (playerRef.current) playerRef.current.load(videoId, 0, true);
+    const title = track.title || watchUrl(track.videoId);
+    const np = {
+      videoId: track.videoId,
+      title,
+      displayTitle: track.displayTitle || title,
+    };
+    setNowPlaying(np);
+    nowPlayingRef.current = np;
+    if (playerRef.current) playerRef.current.load(np.videoId, 0, true);
     // Push the new video id to guests right away.
-    broadcast({ videoId, title, isPlaying: true, position: 0, timestamp: Date.now() });
+    broadcast({
+      videoId: np.videoId,
+      title: np.title,
+      displayTitle: np.displayTitle,
+      isPlaying: true,
+      position: 0,
+      timestamp: Date.now(),
+    });
   }, [broadcast]);
 
   const handleStartHosting = (e) => {
@@ -161,25 +217,58 @@ const Host = () => {
     return id;
   };
 
-  const handlePlayNow = () => {
+  const handlePlayNow = async () => {
     const id = resolveInput();
     if (!id) return;
-    playVideo(id, watchUrl(id));
+    // Start with a placeholder so playback begins immediately. displayTitle
+    // is the literal default; title is the URL until oEmbed fills it in.
+    const url = watchUrl(id);
+    playVideo({ videoId: id, title: url, displayTitle: 'Funky Tune' });
     setUrlInput('');
+
+    const fetched = await fetchYouTubeTitle(id);
+    if (!fetched) return;
+    // Only patch if the user is still on this track (they might have hit
+    // Play on something else before oEmbed resolved).
+    setNowPlaying((prev) => {
+      if (!prev || prev.videoId !== id) return prev;
+      return { ...prev, title: fetched };
+    });
+    // Push the updated title to guests so their "Now playing" updates too.
+    if (nowPlayingRef.current && nowPlayingRef.current.videoId === id) {
+      broadcast({ title: fetched });
+    }
   };
 
-  const handleAddToPlaylist = () => {
+
+  const handleAddToPlaylist = async () => {
     const id = resolveInput();
     if (!id) return;
-    dispatch(addTrack({ videoId: id, title: watchUrl(id) }));
+    // Add now with a placeholder title so the row appears instantly.
+    const action = dispatch(addTrack({ videoId: id }));
     setUrlInput('');
+    // Fill in the real title in the background; ignore failures (the user
+    // can still rename the row inline).
+    const title = await fetchYouTubeTitle(id);
+    if (title) dispatch(updateTrack({ id: action.payload.id, title }));
   };
 
   const handlePlayFromList = (index) => {
     const item = items[index];
     if (!item) return;
+    // Re-parse the (possibly edited) link so we always play whatever URL
+    // is currently in the row, not a stale cached videoId.
+    const videoId = parseVideoId(item.url);
+    if (!videoId) {
+      setPlaybackNote('That link couldn\u2019t be parsed as a YouTube video.');
+      return;
+    }
     dispatch(setCurrentIndex(index));
-    playVideo(item.videoId, item.title);
+    playVideo({
+      videoId,
+      title: item.title,
+      displayTitle: item.displayTitle,
+    });
   };
 
   const handleNext = useCallback(() => {
@@ -198,7 +287,7 @@ const Host = () => {
       150: 'The owner disabled embedding for this video, so it can\'t play here.',
     };
     const np = nowPlayingRef.current;
-    const label = np ? ` (${np.title})` : '';
+    const label = np ? ` (${np.displayTitle || np.title})` : '';
     setPlaybackNote(`${messages[code] || 'This video could not be played.'}${label}`);
     // Stop guests from trying to play the broken video.
     broadcast({ isPlaying: false });
@@ -282,9 +371,29 @@ const Host = () => {
             onError={handlePlayerError}
           />
           <div className="now-playing">
-            {nowPlaying ? `Now playing: ${nowPlaying.title}` : 'Nothing playing yet'}
+            {nowPlaying
+              ? `Now playing: ${nowPlaying.displayTitle || nowPlaying.title}`
+              : 'Nothing playing yet'}
           </div>
           {playbackNote && <div className="banner error">{playbackNote}</div>}
+
+          <div className="guest-volume">
+            <label htmlFor="guest-volume-slider">Listener volume</label>
+            <input
+              id="guest-volume-slider"
+              type="range"
+              min="0"
+              max="100"
+              step="1"
+              value={guestVolume}
+              onChange={(e) => setGuestVolume(Number(e.target.value))}
+              aria-label="Listener volume"
+            />
+            <span className="guest-volume-readout">{guestVolume}%</span>
+          </div>
+          <p className="hint">
+            Sets the volume for everyone listening. Your own audio isn't affected.
+          </p>
 
           <div className="add-row">
             <input
@@ -294,7 +403,7 @@ const Host = () => {
               onKeyDown={(e) => e.key === 'Enter' && handlePlayNow()}
             />
             <button className="primary" onClick={handlePlayNow}>Play now</button>
-            <button onClick={handleAddToPlaylist}>Add to playlist</button>
+            <button className='secondary' onClick={handleAddToPlaylist}>Add to playlist</button>
           </div>
           {addError && <div className="hint error">{addError}</div>}
         </section>
@@ -303,9 +412,9 @@ const Host = () => {
           <div className="playlist-head">
             <h2>Playlist ({items.length})</h2>
             <div className="playlist-actions">
-              <button onClick={handleImportClick}>Import CSV</button>
-              <button onClick={handleExport} disabled={items.length === 0}>Export CSV</button>
-              <button onClick={() => dispatch(clearPlaylist())} disabled={items.length === 0}>Clear</button>
+              <button className='secondary' onClick={handleImportClick}>Import CSV</button>
+              <button className='secondary' onClick={handleExport} disabled={items.length === 0}>Export CSV</button>
+              <button className='secondary' onClick={() => dispatch(clearPlaylist())} disabled={items.length === 0}>Clear</button>
               <input
                 ref={fileInputRef}
                 type="file"
@@ -316,20 +425,83 @@ const Host = () => {
             </div>
           </div>
 
-          <ul className="playlist">
-            {items.map((item, index) => (
-              <li key={item.id} className={index === currentIndex ? 'active' : ''}>
-                <span className="track-title" title={item.title}>{item.title}</span>
-                <span className="track-controls">
-                  <button onClick={() => handlePlayFromList(index)} title="Play">▶</button>
-                  <button onClick={() => dispatch(moveTrack({ from: index, to: index - 1 }))} disabled={index === 0} title="Up">↑</button>
-                  <button onClick={() => dispatch(moveTrack({ from: index, to: index + 1 }))} disabled={index === items.length - 1} title="Down">↓</button>
-                  <button onClick={() => dispatch(removeTrack(item.id))} title="Remove">✕</button>
-                </span>
-              </li>
-            ))}
-            {items.length === 0 && <li className="empty">Add tracks with a YouTube link above.</li>}
-          </ul>
+          {items.length === 0 ? (
+            <p className="hint empty-playlist">Add tracks with a YouTube link above.</p>
+          ) : (
+            <table className="playlist-table">
+              <thead>
+                <tr>
+                  <th>Title</th>
+                  <th>Display</th>
+                  <th>Link</th>
+                  <th className="col-controls">Controls</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((item, index) => (
+                  <tr key={item.id} className={index === currentIndex ? 'active' : ''}>
+                    <td>
+                      <input
+                        className="cell-input"
+                        value={item.title}
+                        placeholder={watchUrl(item.videoId)}
+                        aria-label="Title"
+                        onChange={(e) =>
+                          dispatch(updateTrack({ id: item.id, title: e.target.value }))
+                        }
+                      />
+                    </td>
+                    <td>
+                      <input
+                        className="cell-input"
+                        value={item.displayTitle}
+                        placeholder={item.title || watchUrl(item.videoId)}
+                        aria-label="Display title"
+                        onChange={(e) =>
+                          dispatch(updateTrack({ id: item.id, displayTitle: e.target.value }))
+                        }
+                      />
+                    </td>
+                    <td>
+                      <input
+                        className="cell-input"
+                        value={item.url}
+                        placeholder={watchUrl(item.videoId)}
+                        aria-label="Link"
+                        onChange={(e) =>
+                          dispatch(updateTrack({ id: item.id, url: e.target.value }))
+                        }
+                      />
+                    </td>
+                    <td className="col-controls">
+                      <button
+                        className="secondary"
+                        onClick={() => handlePlayFromList(index)}
+                        title="Play"
+                      >▶</button>
+                      <button
+                        className="secondary"
+                        onClick={() => dispatch(moveTrack({ from: index, to: index - 1 }))}
+                        disabled={index === 0}
+                        title="Up"
+                      >↑</button>
+                      <button
+                        className="secondary"
+                        onClick={() => dispatch(moveTrack({ from: index, to: index + 1 }))}
+                        disabled={index === items.length - 1}
+                        title="Down"
+                      >↓</button>
+                      <button
+                        className="secondary"
+                        onClick={() => dispatch(removeTrack(item.id))}
+                        title="Remove"
+                      >✕</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </section>
       </div>
     </div>

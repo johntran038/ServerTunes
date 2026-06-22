@@ -1,7 +1,19 @@
 import { createSlice } from '@reduxjs/toolkit';
-import { makeRowId, watchUrl } from '../../utils/youtube';
+import { makeRowId, parseVideoId, watchUrl } from '../../utils/youtube';
 
 const STORAGE_KEY = 'serverTunes.playlist';
+export const DEFAULT_DISPLAY_TITLE = 'Funky Tune';
+
+function normalize(it) {
+  const title = it.title || watchUrl(it.videoId);
+  return {
+    id: it.id || makeRowId(),
+    videoId: it.videoId,
+    title,
+    displayTitle: it.displayTitle || DEFAULT_DISPLAY_TITLE,
+    url: it.url || watchUrl(it.videoId),
+  };
+}
 
 function loadFromStorage() {
   try {
@@ -10,14 +22,7 @@ function loadFromStorage() {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     // Defensively normalize each row.
-    return parsed
-      .filter((it) => it && it.videoId)
-      .map((it) => ({
-        id: it.id || makeRowId(),
-        videoId: it.videoId,
-        title: it.title || watchUrl(it.videoId),
-        url: it.url || watchUrl(it.videoId),
-      }));
+    return parsed.filter((it) => it && it.videoId).map(normalize);
   } catch {
     return [];
   }
@@ -42,12 +47,14 @@ const playlistSlice = createSlice({
         state.items.push(action.payload);
         if (state.currentIndex === -1) state.currentIndex = 0;
       },
-      prepare({ videoId, title }) {
+      prepare({ videoId, title, displayTitle }) {
+        const resolvedTitle = title || watchUrl(videoId);
         return {
           payload: {
             id: makeRowId(),
             videoId,
-            title: title || watchUrl(videoId),
+            title: resolvedTitle,
+            displayTitle: displayTitle || DEFAULT_DISPLAY_TITLE,
             url: watchUrl(videoId),
           },
         };
@@ -83,16 +90,30 @@ const playlistSlice = createSlice({
       const item = state.items.find((it) => it.id === id);
       if (item) item.title = title;
     },
-    replacePlaylist(state, action) {
-      state.items = action.payload;
-      state.currentIndex = action.payload.length > 0 ? 0 : -1;
+    /**
+     * Update one or more of `title` / `displayTitle` / `url` for a row.
+     * Pass any field as a string to overwrite it; omitted fields are left
+     * as-is. When `url` is updated and parses to a valid YouTube id, the
+     * row's `videoId` is refreshed too.
+     */
+    updateTrack(state, action) {
+      const { id, title, displayTitle, url } = action.payload;
+      const item = state.items.find((it) => it.id === id);
+      if (!item) return;
+      if (typeof title === 'string') item.title = title;
+      if (typeof displayTitle === 'string') item.displayTitle = displayTitle;
+      if (typeof url === 'string') {
+        item.url = url;
+        const parsed = parseVideoId(url);
+        if (parsed) item.videoId = parsed;
+      }
     },
     appendPlaylist(state, action) {
       const existing = new Set(state.items.map((it) => it.videoId));
-      for (const item of action.payload) {
-        if (!existing.has(item.videoId)) {
-          state.items.push(item);
-          existing.add(item.videoId);
+      for (const raw of action.payload) {
+        if (!existing.has(raw.videoId)) {
+          state.items.push(normalize(raw));
+          existing.add(raw.videoId);
         }
       }
       if (state.currentIndex === -1 && state.items.length > 0) state.currentIndex = 0;
@@ -110,6 +131,7 @@ export const {
   moveTrack,
   setCurrentIndex,
   setTrackTitle,
+  updateTrack,
   replacePlaylist,
   appendPlaylist,
   clearPlaylist,

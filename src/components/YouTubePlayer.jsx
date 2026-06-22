@@ -1,3 +1,4 @@
+// src/components/YouTubePlayer.jsx
 import React, { useEffect, useImperativeHandle, useRef, forwardRef } from 'react';
 
 /**
@@ -31,13 +32,17 @@ function loadYouTubeApi() {
  * Props:
  *   controllable  when false (guests) pointer events are disabled so users
  *                 can't drive their own player - the host is in control.
+ *   hidden        when true the wrapper is pulled offscreen so the embed is
+ *                 invisible but the iframe stays mounted and audible. We
+ *                 deliberately don't use `display: none`, which would cause
+ *                 some browsers to unload/pause the iframe.
  *   onStateChange (ytState) => void
  *   onReady       () => void
  *   onEnded       () => void
  *   onError       (code) => void   YT error codes: 2, 5, 100, 101, 150
  */
 const YouTubePlayer = forwardRef(function YouTubePlayer(
-  { controllable = true, onStateChange, onReady, onEnded, onError },
+  { controllable = true, hidden = false, onStateChange, onReady, onEnded, onError },
   ref,
 ) {
   const containerRef = useRef(null);
@@ -187,9 +192,9 @@ const YouTubePlayer = forwardRef(function YouTubePlayer(
   }), []);
 
   return (
-    <div className="yt-wrapper">
+    <div className={`yt-wrapper${hidden ? ' yt-hidden' : ''}`} aria-hidden={hidden || undefined}>
       <div ref={containerRef} />
-      {!controllable && <div className="yt-guard" title="The host controls playback" />}
+      {!controllable && !hidden && <div className="yt-guard" title="The host controls playback" />}
     </div>
   );
 });
