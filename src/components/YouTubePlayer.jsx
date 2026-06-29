@@ -25,9 +25,29 @@ function loadYouTubeApi() {
 }
 
 /**
+ * Build the argument object for loadVideoById / cueVideoById, including
+ * `endSeconds` only when a finite number was supplied. Passing
+ * `endSeconds: undefined` to the YT API would otherwise leak through and
+ * trip up some versions of the player.
+ */
+function buildLoadArgs(videoId, startSeconds, endSeconds) {
+  const args = { videoId, startSeconds };
+  if (typeof endSeconds === 'number' && Number.isFinite(endSeconds)) {
+    args.endSeconds = endSeconds;
+  }
+  return args;
+}
+
+/**
  * Thin wrapper around the YouTube IFrame player exposing an imperative API
- * via ref: load(videoId, startSeconds), play(), pause(), stop(), seek(seconds),
- * getTime(), getState(), getDuration(), mute/unMute/isMuted/setVolume.
+ * via ref: load(videoId, startSeconds, autoplay, endSeconds), play(),
+ * pause(), stop(), seek(seconds), getTime(), getState(), getDuration(),
+ * mute/unMute/isMuted/setVolume.
+ *
+ * `endSeconds` on `load()` is the per-track crop end. When provided, the
+ * YouTube player auto-pauses at that point. If it exceeds the video's
+ * duration the player just stops at the natural end, which is exactly
+ * what we want for a "clamp to video length" semantic.
  *
  * Props:
  *   controllable  when false (guests) pointer events are disabled so users
@@ -48,7 +68,7 @@ const YouTubePlayer = forwardRef(function YouTubePlayer(
   const containerRef = useRef(null);
   const playerRef = useRef(null);
   const readyRef = useRef(false);
-  const pendingRef = useRef(null); // {videoId, startSeconds, autoplay}
+  const pendingRef = useRef(null); // {videoId, startSeconds, autoplay, endSeconds}
 
   // Keep the latest callbacks in refs. The YT player is created once, so its
   // event handlers would otherwise capture stale props (e.g. an empty
@@ -81,12 +101,13 @@ const YouTubePlayer = forwardRef(function YouTubePlayer(
           onReady: () => {
             readyRef.current = true;
             if (pendingRef.current) {
-              const { videoId, startSeconds, autoplay } = pendingRef.current;
+              const { videoId, startSeconds, autoplay, endSeconds } = pendingRef.current;
               pendingRef.current = null;
+              const args = buildLoadArgs(videoId, startSeconds, endSeconds);
               if (autoplay) {
-                playerRef.current.loadVideoById({ videoId, startSeconds });
+                playerRef.current.loadVideoById(args);
               } else {
-                playerRef.current.cueVideoById({ videoId, startSeconds });
+                playerRef.current.cueVideoById(args);
               }
             }
             if (onReadyRef.current) onReadyRef.current();
@@ -119,16 +140,17 @@ const YouTubePlayer = forwardRef(function YouTubePlayer(
   }, []);
 
   useImperativeHandle(ref, () => ({
-    load(videoId, startSeconds = 0, autoplay = true) {
+    load(videoId, startSeconds = 0, autoplay = true, endSeconds) {
       if (!videoId) return;
       if (!readyRef.current || !playerRef.current) {
-        pendingRef.current = { videoId, startSeconds, autoplay };
+        pendingRef.current = { videoId, startSeconds, autoplay, endSeconds };
         return;
       }
+      const args = buildLoadArgs(videoId, startSeconds, endSeconds);
       if (autoplay) {
-        playerRef.current.loadVideoById({ videoId, startSeconds });
+        playerRef.current.loadVideoById(args);
       } else {
-        playerRef.current.cueVideoById({ videoId, startSeconds });
+        playerRef.current.cueVideoById(args);
       }
     },
     play() {

@@ -15,6 +15,7 @@ import {
 } from '../redux/slices/playlistSlice';
 import { startHosting, leaveSession } from '../redux/slices/sessionSlice';
 import { parseVideoId, watchUrl, fetchYouTubeTitle } from '../utils/youtube';
+import { parseCrop, normalizeCropText } from '../utils/crop';
 import { playlistToCsv, csvToPlaylist, downloadCsv } from '../utils/csv';
 
 // YouTube player states
@@ -26,6 +27,15 @@ const PLAYING = 1;
 // the firehose of input events you get while dragging, short enough that the
 // listener side feels live.
 const VOLUME_BROADCAST_DEBOUNCE = 80;
+
+// How often we sample the playhead to detect "we just crossed cropEnd".
+// We deliberately do NOT pass endSeconds into the YT player on the host:
+// once baked in, it can't be cleared without reloading the video, which
+// would make live crop edits (e.g. clearing the field mid-play) jerky.
+// The poll is the single source of truth for "stop at cropEnd" on the
+// host, so retargeting nowPlaying.cropEnd is enough to make changes
+// take effect immediately.
+const CROP_END_POLL_MS = 250;
 
 const Host = () => {
   const dispatch = useDispatch();
@@ -46,8 +56,10 @@ const Host = () => {
 
   // --- playback state ---
   // nowPlaying carries both the canonical title and the friendlier
-  // displayTitle so we can broadcast both to guests.
-  const [nowPlaying, setNowPlaying] = useState(null); // { videoId, title, displayTitle }
+  // displayTitle so we can broadcast both to guests. cropStart/cropEnd
+  // track the active track's crop window and are kept in sync with the
+  // playlist row, so edits to the crop field take effect live.
+  const [nowPlaying, setNowPlaying] = useState(null); // { videoId, title, displayTitle, cropStart, cropEnd }
   const [urlInput, setUrlInput] = useState('');
   const [addError, setAddError] = useState('');
   const [playbackNote, setPlaybackNote] = useState('');
@@ -69,6 +81,13 @@ const Host = () => {
   const playerRef = useRef(null);
   const nowPlayingRef = useRef(nowPlaying);
   useEffect(() => { nowPlayingRef.current = nowPlaying; }, [nowPlaying]);
+
+  // Tracks whether the crop-end poll has already fired handleNext for the
+  // current track. Without this flag the poll would re-fire every tick
+  // while we're parked at cropEnd in the stop-at-end branch. Reset on
+  // every new load, every loop, and whenever cropEnd itself changes so a
+  // live edit can re-arm the poll for the new target.
+  const endFiredRef = useRef(false);
 
   // Tab-visibility plumbing.
   // wantsPlayingRef captures what the HOST last intended (play/pause from a
@@ -127,6 +146,10 @@ const Host = () => {
       videoId: np.videoId,
       title: np.title,
       displayTitle: np.displayTitle,
+      // cropEnd rides along so late joiners pick up the per-track stop
+      // point on their first load. undefined when no crop is set, which
+      // JSON.stringify drops on the wire.
+      cropEnd: np.cropEnd,
       isPlaying,
       position,
       timestamp: Date.now(),
@@ -192,39 +215,72 @@ const Host = () => {
     return () => document.removeEventListener('visibilitychange', handleVisibility);
   }, [broadcast]);
 
-  // Keep nowPlaying in sync with the current playlist row when the host
-  // edits its title / displayTitle inline. The next heartbeat will then
-  // broadcast the new values to guests.
+  // Keep nowPlaying in sync with the current playlist row. Title /
+  // displayTitle changes flow straight through so the "Now playing"
+  // label and broadcasts update. Crop also mirrors live: clearing or
+  // editing the field on the active row retargets the poll on the next
+  // tick (cropEnd undefined = no stop, just play to natural end). When
+  // cropEnd changes we re-arm endFiredRef so the new target can fire.
   useEffect(() => {
     setNowPlaying((prev) => {
       if (!prev) return prev;
       const match = items.find((it) => it.videoId === prev.videoId);
       if (!match) return prev;
-      if (match.title === prev.title && match.displayTitle === prev.displayTitle) {
+      const crop = parseCrop(match.crop);
+      const cropStart = crop ? crop.start : 0;
+      const cropEnd = crop ? crop.end : undefined;
+      if (
+        match.title === prev.title &&
+        match.displayTitle === prev.displayTitle &&
+        cropStart === prev.cropStart &&
+        cropEnd === prev.cropEnd
+      ) {
         return prev;
       }
-      return { ...prev, title: match.title, displayTitle: match.displayTitle };
+      if (cropEnd !== prev.cropEnd) {
+        endFiredRef.current = false;
+      }
+      return {
+        ...prev,
+        title: match.title,
+        displayTitle: match.displayTitle,
+        cropStart,
+        cropEnd,
+      };
     });
   }, [items]);
 
   const playVideo = useCallback((track) => {
     setPlaybackNote('');
     const title = track.title || watchUrl(track.videoId);
+    const crop = parseCrop(track.crop);
+    const startSeconds = crop ? crop.start : 0;
+    const endSeconds = crop ? crop.end : undefined;
     const np = {
       videoId: track.videoId,
       title,
       displayTitle: track.displayTitle || title,
+      cropStart: startSeconds,
+      cropEnd: endSeconds,
     };
     setNowPlaying(np);
     nowPlayingRef.current = np;
-    if (playerRef.current) playerRef.current.load(np.videoId, 0, true);
+    endFiredRef.current = false;
+    // We deliberately omit endSeconds here. The poll is what stops the
+    // host at cropEnd; passing endSeconds to YT would lock in a stop
+    // point we can't undo without a hard reload, which would make live
+    // edits (especially clearing the field mid-play) feel broken.
+    if (playerRef.current) {
+      playerRef.current.load(np.videoId, startSeconds, true);
+    }
     // Push the new video id to guests right away.
     broadcast({
       videoId: np.videoId,
       title: np.title,
       displayTitle: np.displayTitle,
+      cropEnd: np.cropEnd,
       isPlaying: true,
-      position: 0,
+      position: startSeconds,
       timestamp: Date.now(),
     });
   }, [broadcast]);
@@ -250,6 +306,8 @@ const Host = () => {
     if (!id) return;
     // Start with a placeholder so playback begins immediately. displayTitle
     // is the literal default; title is the URL until oEmbed fills it in.
+    // No crop here: the URL-input "Play now" path doesn't carry a crop
+    // value, so playback is uncropped by design.
     const url = watchUrl(id);
     playVideo({ videoId: id, title: url, displayTitle: 'Funky Tune' });
     setUrlInput('');
@@ -295,25 +353,31 @@ const Host = () => {
       videoId,
       title: item.title,
       displayTitle: item.displayTitle,
+      crop: item.crop,
     });
   };
 
-  // Called on natural end-of-video (YT.PlayerState.ENDED). Honors the
-  // loop / stop-at-end toggles before falling back to advancing the queue.
-  // Loop wins when both toggles are on.
+  // Called on natural end-of-video (YT.PlayerState.ENDED) and from the
+  // crop-end poll. Honors the loop / stop-at-end toggles before falling
+  // back to advancing the queue. Loop wins when both toggles are on.
   const handleNext = useCallback(() => {
     if (items.length === 0) return;
 
     if (loopCurrent) {
       const np = nowPlayingRef.current;
       if (np && playerRef.current) {
-        playerRef.current.load(np.videoId, 0, true);
+        const startSeconds = np.cropStart || 0;
+        endFiredRef.current = false;
+        // Same reason as playVideo: no endSeconds, the poll handles
+        // the next cropEnd hit.
+        playerRef.current.load(np.videoId, startSeconds, true);
         broadcast({
           videoId: np.videoId,
           title: np.title,
           displayTitle: np.displayTitle,
+          cropEnd: np.cropEnd,
           isPlaying: true,
-          position: 0,
+          position: startSeconds,
           timestamp: Date.now(),
         });
       }
@@ -351,6 +415,28 @@ const Host = () => {
     if (items.length > 0 && next < items.length) handlePlayFromList(next);
   }, [broadcast, items, currentIndex]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Crop-end detection. Since we deliberately don't pass endSeconds to YT
+  // (so live edits to the crop field can take effect without a hard
+  // reload), the poll is the host's only stop signal. endFiredRef keeps
+  // this from re-firing every tick once we're parked at cropEnd; it
+  // resets on every fresh load, every loop, and whenever the active
+  // track's cropEnd changes (see the items-sync effect above).
+  useEffect(() => {
+    if (status !== 'connected') return undefined;
+    const id = setInterval(() => {
+      if (endFiredRef.current) return;
+      const np = nowPlayingRef.current;
+      if (!np || typeof np.cropEnd !== 'number') return;
+      const player = playerRef.current;
+      if (!player) return;
+      if (player.getTime() >= np.cropEnd) {
+        endFiredRef.current = true;
+        handleNext();
+      }
+    }, CROP_END_POLL_MS);
+    return () => clearInterval(id);
+  }, [status, handleNext]);
+
   useEffect(() => {
     const base = 'ServerTunes';
     const label = nowPlaying?.displayTitle || nowPlaying?.title;
@@ -387,6 +473,12 @@ const Host = () => {
   // child stays a pure view and never imports Redux.
   const handleFieldChange = (id, field, value) => {
     dispatch(updateTrack({ id, [field]: value }));
+  };
+  // On blur of the crop input, commit the normalized text back. The
+  // playback already uses the corrected interpretation via parseCrop, so
+  // this is purely about tidying what the user sees in the field.
+  const handleCropBlur = (id, value) => {
+    dispatch(updateTrack({ id, crop: normalizeCropText(value) }));
   };
   const handleMoveUp = (index) => dispatch(moveTrack({ from: index, to: index - 1 }));
   const handleMoveDown = (index) => dispatch(moveTrack({ from: index, to: index + 1 }));
@@ -471,6 +563,7 @@ const Host = () => {
             items={items}
             currentIndex={currentIndex}
             onFieldChange={handleFieldChange}
+            onCropBlur={handleCropBlur}
             onPlay={handlePlayFromList}
             onMoveUp={handleMoveUp}
             onMoveDown={handleMoveDown}

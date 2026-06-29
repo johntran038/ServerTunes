@@ -1,15 +1,16 @@
 /**
  * Minimal, dependency-free CSV import/export for playlist items.
  *
- * Columns: videoId,title,displayTitle,url
+ * Columns: videoId,title,displayTitle,url,crop
  * The parser handles quoted fields, embedded commas, escaped quotes ("")
- * and both \n and \r\n line endings. Old 3-column exports
- * (videoId,title,url) are still accepted; displayTitle defaults to title.
+ * and both \n and \r\n line endings. Older exports without `crop` or
+ * `displayTitle` are still accepted; missing fields fall back to sensible
+ * defaults (displayTitle defaults to title, crop defaults to '').
  */
 
 import { parseVideoId, makeRowId, watchUrl } from './youtube';
 
-const HEADER = ['videoId', 'title', 'displayTitle', 'url'];
+const HEADER = ['videoId', 'title', 'displayTitle', 'url', 'crop'];
 
 function escapeField(value) {
   const str = value == null ? '' : String(value);
@@ -30,6 +31,7 @@ export function playlistToCsv(items) {
       escapeField(title),
       escapeField(displayTitle),
       escapeField(item.url || watchUrl(item.videoId)),
+      escapeField(item.crop || ''),
     ].join(','));
   }
   return lines.join('\r\n');
@@ -90,7 +92,9 @@ function parseRows(text) {
  *  - an optional header row
  *  - a single column of URLs/ids
  *  - the legacy videoId,title,url layout
- *  - the current videoId,title,displayTitle,url layout produced by playlistToCsv
+ *  - the previous videoId,title,displayTitle,url layout
+ *  - the current videoId,title,displayTitle,url,crop layout produced by
+ *    playlistToCsv
  */
 export function csvToPlaylist(text) {
   const rows = parseRows(text);
@@ -101,7 +105,7 @@ export function csvToPlaylist(text) {
     first.includes('videoid') || first.includes('url') || first.includes('title');
 
   // Default positional layout for headerless input: videoId, title, url.
-  let idx = { videoId: 0, title: 1, displayTitle: -1, url: 2 };
+  let idx = { videoId: 0, title: 1, displayTitle: -1, url: 2, crop: -1 };
   let start = 0;
   if (hasHeader) {
     start = 1;
@@ -110,6 +114,7 @@ export function csvToPlaylist(text) {
       title: first.indexOf('title'),
       displayTitle: first.indexOf('displaytitle'),
       url: first.indexOf('url'),
+      crop: first.indexOf('crop'),
     };
   }
 
@@ -136,6 +141,7 @@ export function csvToPlaylist(text) {
     const titleRaw = idx.title >= 0 ? (cols[idx.title] || '').trim() : '';
     const displayRaw =
       idx.displayTitle >= 0 ? (cols[idx.displayTitle] || '').trim() : '';
+    const cropRaw = idx.crop >= 0 ? (cols[idx.crop] || '').trim() : '';
     const title = titleRaw || watchUrl(videoId);
     const displayTitle = displayRaw || title;
 
@@ -145,6 +151,7 @@ export function csvToPlaylist(text) {
       title,
       displayTitle,
       url: watchUrl(videoId),
+      crop: cropRaw,
     });
   }
   return items;

@@ -155,7 +155,7 @@ button.secondary { background: var(--accent-3); border-color: var(--accent-3); c
 .playlist-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
 .playlist-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 
-/* Playlist as a 4-column table */
+/* Playlist as a 5-column table: Title, Display, Link, Crop, Controls */
 .empty-playlist { margin-top: 12px; text-align: center; }
 
 .playlist-table {
@@ -174,14 +174,31 @@ button.secondary { background: var(--accent-3); border-color: var(--accent-3); c
   font-weight: 500;
   padding: 0 8px 4px;
 }
+/* Default widths target narrow playlist columns (~860-1300px viewport):
+   the four control buttons need ~30% to stay on one line and not
+   overflow into Crop. */
 .playlist-table th:nth-child(1),
-.playlist-table td:nth-child(1) { width: 24%; }
+.playlist-table td:nth-child(1) { width: 20%; }
 .playlist-table th:nth-child(2),
-.playlist-table td:nth-child(2) { width: 22%; }
+.playlist-table td:nth-child(2) { width: 18%; }
 .playlist-table th:nth-child(3),
-.playlist-table td:nth-child(3) { width: 22%; }
+.playlist-table td:nth-child(3) { width: 20%; }
 .playlist-table th:nth-child(4),
-.playlist-table td:nth-child(4) { width: 34%; }
+.playlist-table td:nth-child(4) { width: 12%; }
+.playlist-table th:nth-child(5),
+.playlist-table td:nth-child(5) { width: 30%; }
+
+/* Past ~1300px the playlist column is wide enough that the four buttons
+   (fixed pixel width) no longer need 30%, so reclaim the slack on the
+   left of the controls and give it back to Crop. The Controls column is
+   text-align: right; nowrap, so empty space pools on its left side and
+   ends up wasted at wide widths if we don't reshuffle. */
+@media (min-width: 1300px) {
+  .playlist-table th:nth-child(4),
+  .playlist-table td:nth-child(4) { width: 18%; }
+  .playlist-table th:nth-child(5),
+  .playlist-table td:nth-child(5) { width: 24%; }
+}
 
 .playlist-table tbody td {
   background: var(--panel);

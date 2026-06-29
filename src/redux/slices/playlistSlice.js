@@ -12,6 +12,7 @@ function normalize(it) {
     title,
     displayTitle: it.displayTitle || DEFAULT_DISPLAY_TITLE,
     url: it.url || watchUrl(it.videoId),
+    crop: typeof it.crop === 'string' ? it.crop : '',
   };
 }
 
@@ -47,7 +48,7 @@ const playlistSlice = createSlice({
         state.items.push(action.payload);
         if (state.currentIndex === -1) state.currentIndex = 0;
       },
-      prepare({ videoId, title, displayTitle }) {
+      prepare({ videoId, title, displayTitle, crop }) {
         const resolvedTitle = title || watchUrl(videoId);
         return {
           payload: {
@@ -56,6 +57,7 @@ const playlistSlice = createSlice({
             title: resolvedTitle,
             displayTitle: displayTitle || DEFAULT_DISPLAY_TITLE,
             url: watchUrl(videoId),
+            crop: typeof crop === 'string' ? crop : '',
           },
         };
       },
@@ -91,17 +93,18 @@ const playlistSlice = createSlice({
       if (item) item.title = title;
     },
     /**
-     * Update one or more of `title` / `displayTitle` / `url` for a row.
-     * Pass any field as a string to overwrite it; omitted fields are left
-     * as-is. When `url` is updated and parses to a valid YouTube id, the
-     * row's `videoId` is refreshed too.
+     * Update one or more of `title` / `displayTitle` / `url` / `crop` for a
+     * row. Pass any field as a string to overwrite it; omitted fields are
+     * left as-is. When `url` is updated and parses to a valid YouTube id,
+     * the row's `videoId` is refreshed too.
      */
     updateTrack(state, action) {
-      const { id, title, displayTitle, url } = action.payload;
+      const { id, title, displayTitle, url, crop } = action.payload;
       const item = state.items.find((it) => it.id === id);
       if (!item) return;
       if (typeof title === 'string') item.title = title;
       if (typeof displayTitle === 'string') item.displayTitle = displayTitle;
+      if (typeof crop === 'string') item.crop = crop;
       if (typeof url === 'string') {
         item.url = url;
         const parsed = parseVideoId(url);

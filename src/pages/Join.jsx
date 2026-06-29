@@ -91,7 +91,9 @@ const Join = () => {
 
     if (currentVideoRef.current !== payload.videoId) {
       currentVideoRef.current = payload.videoId;
-      player.load(payload.videoId, targetTime, payload.isPlaying);
+      // Forward cropEnd so the guest player auto-pauses at the same stop
+      // point as the host. undefined means "no crop, play to natural end".
+      player.load(payload.videoId, targetTime, payload.isPlaying, payload.cropEnd);
       ensureAudible();
       return;
     }
