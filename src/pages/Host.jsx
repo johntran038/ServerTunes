@@ -510,7 +510,7 @@ const Host = () => {
   const statusLabel = status === 'connected'
     ? `Live · ${guestCount} listening`
     : status;
-
+ 
   return (
     <div className="page host">
       <SessionHeader
