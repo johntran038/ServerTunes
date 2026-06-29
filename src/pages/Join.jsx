@@ -138,6 +138,13 @@ const Join = () => {
     }
   }, [isJoined]);
 
+  useEffect(() => {
+    const base = 'ServerTunes';
+    const label = nowPlaying?.displayTitle || nowPlaying?.title;
+    document.title = label ? `${label} - ${base}` : base;
+    return () => { document.title = base; };
+  }, [nowPlaying]);
+
   // After the host comes back the player remounts; re-apply the most recent
   // payload so the guest doesn't have to wait for the next 3s heartbeat.
   useEffect(() => {

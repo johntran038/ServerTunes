@@ -352,6 +352,13 @@ const Host = () => {
     if (items.length > 0 && next < items.length) handlePlayFromList(next);
   }, [broadcast, items, currentIndex]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  useEffect(() => {
+    const base = 'ServerTunes';
+    const label = nowPlaying?.displayTitle || nowPlaying?.title;
+    document.title = label ? `${label} - ${base}` : base;
+    return () => { document.title = base; };
+  }, [nowPlaying]);
+
   // Don't broadcast a "paused" event that fired only because the tab went
   // hidden (i.e. the browser auto-paused the iframe). While visible we
   // forward every state change so user play/pause clicks still reach guests.
@@ -453,10 +460,10 @@ const Host = () => {
             </label>
             <label>
               {loopCurrent ? (
-                <RxLoop size="1.3rem"/>
+                <RxLoop size="1.3rem" />
               ) : (
                 stopAtEnd && (
-                  <PiNumberCircleOneBold size="1.3rem"/>
+                  <PiNumberCircleOneBold size="1.3rem" />
                 )
               )
               }
