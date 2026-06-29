@@ -3,6 +3,9 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
 import YouTubePlayer from '../components/YouTubePlayer';
+import SessionHeader from '../components/SessionHeader';
+import JoinSetupForm from '../components/join/JoinSetupForm';
+import HostGoneNotice from '../components/join/HostGoneNotice';
 import useConnection from '../hooks/useConnection';
 import { startJoining, leaveSession } from '../redux/slices/sessionSlice';
 
@@ -204,22 +207,16 @@ const Join = () => {
 
   if (!isJoined) {
     return (
-      <div className="page join-setup">
-        <button className="link-back" onClick={() => navigate('/')}>&larr; Back</button>
-        <h1>Join a session</h1>
-        <form className="form" onSubmit={handleJoin}>
-          <label>Display name
-            <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
-          </label>
-          <label>Room name (from the host)
-            <input value={room} onChange={(e) => setRoom(e.target.value)} required />
-          </label>
-          <label>Room password (if set)
-            <input value={password} onChange={(e) => setPassword(e.target.value)} />
-          </label>
-          <button type="submit" className="primary">Join</button>
-        </form>
-      </div>
+      <JoinSetupForm
+        displayName={displayName}
+        room={room}
+        password={password}
+        onDisplayNameChange={setDisplayName}
+        onRoomChange={setRoom}
+        onPasswordChange={setPassword}
+        onBack={() => navigate('/')}
+        onSubmit={handleJoin}
+      />
     );
   }
 
@@ -227,14 +224,16 @@ const Join = () => {
     ? (nowPlaying.displayTitle || nowPlaying.title)
     : null;
 
+  const statusLabel = status === 'connected' ? 'Connected to host' : status;
+
   return (
     <div className="page join">
-      <header className="bar">
-        <button className="link-back" onClick={handleLeave}>&larr; Leave</button>
-        <div className={`status status-${status}`}>
-          {status === 'connected' ? 'Connected to host' : status}
-        </div>
-      </header>
+      <SessionHeader
+        onLeave={handleLeave}
+        leaveLabel="Leave"
+        status={status}
+        statusLabel={statusLabel}
+      />
       {error && <div className="banner error">{error}</div>}
       {needsGesture && !hostLeft && (
         <button className="banner gesture" onClick={handleEnableAudio}>
@@ -244,12 +243,7 @@ const Join = () => {
 
       <div className="join-stage">
         {hostLeft ? (
-          <div className="host-gone">
-            <div className="host-gone-title">The host left the session</div>
-            <div className="host-gone-sub">
-              Waiting for them to come back, or you can leave.
-            </div>
-          </div>
+          <HostGoneNotice />
         ) : (
           <>
             {/* Hidden so guests only hear the host - the iframe stays mounted

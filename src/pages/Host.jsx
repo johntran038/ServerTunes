@@ -3,13 +3,12 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
 import YouTubePlayer from '../components/YouTubePlayer';
+import SessionHeader from '../components/SessionHeader';
+import HostSetupForm from '../components/host/HostSetupForm';
+import HostControls from '../components/host/HostControls';
+import PlaylistToolbar from '../components/host/PlaylistToolbar';
+import PlaylistTable from '../components/host/PlaylistTable';
 import useConnection from '../hooks/useConnection';
-import { FaPlay } from "react-icons/fa";
-import { FaArrowUpLong } from "react-icons/fa6";
-import { FaArrowDownLong } from "react-icons/fa6";
-import { ImCross } from "react-icons/im";
-import { RxLoop } from "react-icons/rx";
-import { PiNumberCircleOneBold } from "react-icons/pi";
 import {
   addTrack, removeTrack, moveTrack, setCurrentIndex,
   updateTrack, appendPlaylist, clearPlaylist,
@@ -20,7 +19,8 @@ import { playlistToCsv, csvToPlaylist, downloadCsv } from '../utils/csv';
 
 // YouTube player states
 const PLAYING = 1;
-const PAUSED = 2;
+// PAUSED is intentionally not used directly here, but kept in mind: ytState
+// is compared against PLAYING and everything else is treated as "not playing".
 
 // Debounce window for slider-driven volume broadcasts. Long enough to coalesce
 // the firehose of input events you get while dragging, short enough that the
@@ -67,7 +67,6 @@ const Host = () => {
   useEffect(() => { guestVolumeRef.current = guestVolume; }, [guestVolume]);
 
   const playerRef = useRef(null);
-  const fileInputRef = useRef(null);
   const nowPlayingRef = useRef(nowPlaying);
   useEffect(() => { nowPlayingRef.current = nowPlaying; }, [nowPlaying]);
 
@@ -371,7 +370,6 @@ const Host = () => {
   const handleExport = () => {
     downloadCsv('servertunes-playlist.csv', playlistToCsv(items));
   };
-  const handleImportClick = () => fileInputRef.current?.click();
   const handleImportFile = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -385,6 +383,15 @@ const Host = () => {
     e.target.value = '';
   };
 
+  // Playlist row callbacks (passed to <PlaylistTable />). Kept here so the
+  // child stays a pure view and never imports Redux.
+  const handleFieldChange = (id, field, value) => {
+    dispatch(updateTrack({ id, [field]: value }));
+  };
+  const handleMoveUp = (index) => dispatch(moveTrack({ from: index, to: index - 1 }));
+  const handleMoveDown = (index) => dispatch(moveTrack({ from: index, to: index + 1 }));
+  const handleRemove = (id) => dispatch(removeTrack(id));
+
   const handleLeave = () => {
     dispatch(leaveSession());
     navigate('/');
@@ -393,36 +400,33 @@ const Host = () => {
   // ---- setup screen ----
   if (!isHosting) {
     return (
-      <div className="page host-setup">
-        <button className="link-back" onClick={() => navigate('/')}>&larr; Back</button>
-        <h1>Host a session</h1>
-        <p className="tagline">Sync runs through the public test.mosquitto.org broker. No port forwarding needed.</p>
-        {setupError && <div className="banner error">{setupError}</div>}
-        <form className="form" onSubmit={handleStartHosting}>
-          <label>Display name
-            <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
-          </label>
-          <label>Room name (share this with guests)
-            <input value={room} onChange={(e) => setRoom(e.target.value)} />
-          </label>
-          <label>Room password (optional)
-            <input value={password} onChange={(e) => setPassword(e.target.value)} />
-          </label>
-          <button type="submit" className="primary">Start hosting</button>
-        </form>
-      </div>
+      <HostSetupForm
+        displayName={displayName}
+        room={room}
+        password={password}
+        onDisplayNameChange={setDisplayName}
+        onRoomChange={setRoom}
+        onPasswordChange={setPassword}
+        onBack={() => navigate('/')}
+        onSubmit={handleStartHosting}
+        setupError={setupError}
+      />
     );
   }
 
   // ---- hosting screen ----
+  const statusLabel = status === 'connected'
+    ? `Live · ${guestCount} listening`
+    : status;
+
   return (
     <div className="page host">
-      <header className="bar">
-        <button className="link-back" onClick={handleLeave}>&larr; End session</button>
-        <div className={`status status-${status}`}>
-          {status === 'connected' ? `Live · ${guestCount} listening` : status}
-        </div>
-      </header>
+      <SessionHeader
+        onLeave={handleLeave}
+        leaveLabel="End session"
+        status={status}
+        statusLabel={statusLabel}
+      />
       {error && <div className="banner error">{error}</div>}
 
       <div className="host-grid">
@@ -441,160 +445,37 @@ const Host = () => {
           </div>
           {playbackNote && <div className="banner error">{playbackNote}</div>}
 
-          <div className="playback-toggles">
-            <label>
-              <input
-                type="checkbox"
-                checked={loopCurrent}
-                onChange={(e) => setLoopCurrent(e.target.checked)}
-              />
-              Loop current song
-            </label>
-            <label>
-              <input
-                type="checkbox"
-                checked={stopAtEnd}
-                onChange={(e) => setStopAtEnd(e.target.checked)}
-              />
-              Stop after this song
-            </label>
-            <label>
-              {loopCurrent ? (
-                <RxLoop size="1.3rem" />
-              ) : (
-                stopAtEnd && (
-                  <PiNumberCircleOneBold size="1.3rem" />
-                )
-              )
-              }
-            </label>
-          </div>
-
-          <div className="guest-volume">
-            <label htmlFor="guest-volume-slider">Listener volume</label>
-            <input
-              id="guest-volume-slider"
-              type="range"
-              min="0"
-              max="100"
-              step="1"
-              value={guestVolume}
-              onChange={(e) => setGuestVolume(Number(e.target.value))}
-              aria-label="Listener volume"
-            />
-            <span className="guest-volume-readout">{guestVolume}%</span>
-          </div>
-          <p className="hint">
-            Sets the volume for everyone listening. Your own audio isn't affected.
-          </p>
-
-          <div className="add-row">
-            <input
-              placeholder="Paste a YouTube link or video ID"
-              value={urlInput}
-              onChange={(e) => setUrlInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handlePlayNow()}
-            />
-            <button className="primary" onClick={handlePlayNow}>Play now</button>
-            <button className='secondary' onClick={handleAddToPlaylist}>Add to playlist</button>
-          </div>
-          {addError && <div className="hint error">{addError}</div>}
+          <HostControls
+            loopCurrent={loopCurrent}
+            stopAtEnd={stopAtEnd}
+            onLoopCurrentChange={setLoopCurrent}
+            onStopAtEndChange={setStopAtEnd}
+            guestVolume={guestVolume}
+            onGuestVolumeChange={setGuestVolume}
+            urlInput={urlInput}
+            onUrlInputChange={setUrlInput}
+            onPlayNow={handlePlayNow}
+            onAddToPlaylist={handleAddToPlaylist}
+            addError={addError}
+          />
         </section>
 
         <section className="playlist-col">
-          <div className="playlist-head">
-            <h2>Playlist ({items.length})</h2>
-            <div className="playlist-actions">
-              <button className='secondary' onClick={handleImportClick}>Import CSV</button>
-              <button className='secondary' onClick={handleExport} disabled={items.length === 0}>Export CSV</button>
-              <button className='secondary' onClick={() => dispatch(clearPlaylist())} disabled={items.length === 0}>Clear</button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".csv,text/csv"
-                style={{ display: 'none' }}
-                onChange={handleImportFile}
-              />
-            </div>
-          </div>
-
-          {items.length === 0 ? (
-            <p className="hint empty-playlist">Add tracks with a YouTube link above.</p>
-          ) : (
-            <table className="playlist-table">
-              <thead>
-                <tr>
-                  <th>Title</th>
-                  <th>Display</th>
-                  <th>Link</th>
-                  <th className="col-controls">Controls</th>
-                </tr>
-              </thead>
-              <tbody>
-                {items.map((item, index) => (
-                  <tr key={item.id} className={index === currentIndex ? 'active' : ''}>
-                    <td>
-                      <input
-                        className="cell-input"
-                        value={item.title}
-                        placeholder={watchUrl(item.videoId)}
-                        aria-label="Title"
-                        onChange={(e) =>
-                          dispatch(updateTrack({ id: item.id, title: e.target.value }))
-                        }
-                      />
-                    </td>
-                    <td>
-                      <input
-                        className="cell-input"
-                        value={item.displayTitle}
-                        placeholder={item.title || watchUrl(item.videoId)}
-                        aria-label="Display title"
-                        onChange={(e) =>
-                          dispatch(updateTrack({ id: item.id, displayTitle: e.target.value }))
-                        }
-                      />
-                    </td>
-                    <td>
-                      <input
-                        className="cell-input"
-                        value={item.url}
-                        placeholder={watchUrl(item.videoId)}
-                        aria-label="Link"
-                        onChange={(e) =>
-                          dispatch(updateTrack({ id: item.id, url: e.target.value }))
-                        }
-                      />
-                    </td>
-                    <td className="col-controls">
-                      <button
-                        className="secondary"
-                        onClick={() => handlePlayFromList(index)}
-                        title="Play"
-                      ><FaPlay /></button>
-                      <button
-                        className="secondary"
-                        onClick={() => dispatch(moveTrack({ from: index, to: index - 1 }))}
-                        disabled={index === 0}
-                        title="Up"
-                      ><FaArrowUpLong /></button>
-                      <button
-                        className="secondary"
-                        onClick={() => dispatch(moveTrack({ from: index, to: index + 1 }))}
-                        disabled={index === items.length - 1}
-                        title="Down"
-                      ><FaArrowDownLong /></button>
-                      <button
-                        className="secondary"
-                        onClick={() => dispatch(removeTrack(item.id))}
-                        title="Remove"
-                      ><ImCross /></button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
+          <PlaylistToolbar
+            count={items.length}
+            onImportFile={handleImportFile}
+            onExport={handleExport}
+            onClear={() => dispatch(clearPlaylist())}
+          />
+          <PlaylistTable
+            items={items}
+            currentIndex={currentIndex}
+            onFieldChange={handleFieldChange}
+            onPlay={handlePlayFromList}
+            onMoveUp={handleMoveUp}
+            onMoveDown={handleMoveDown}
+            onRemove={handleRemove}
+          />
         </section>
       </div>
     </div>
