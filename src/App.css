@@ -21,7 +21,8 @@ body {
 }
 
 .page {
-  max-width: 1080px;
+  width: 100%;
+  max-width: min(1600px, 95vw);
   margin: 0 auto;
   padding: 24px;
 }
